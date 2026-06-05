@@ -2,6 +2,8 @@
 
 Type part of a filename and every file and folder that matches shows up instantly, across every mounted volume. It's a macOS clone of [Everything](https://www.voidtools.com/), the search tool I lived in back on Windows.
 
+![EverythingMac searching across 8.2 million files](assets/screenshot.png)
+
 > The folder is called `everything-rust` for historical reasons. There's no Rust in it. The whole app is Swift (SwiftUI and AppKit).
 
 ## Why I built it
