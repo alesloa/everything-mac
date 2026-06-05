@@ -1,0 +1,35 @@
+name: EverythingMac
+options:
+  bundleIdPrefix: com.everythingmac
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  IndexCore:
+    path: ..
+targets:
+  EverythingMac:
+    type: application
+    platform: macOS
+    sources: [Sources, Assets.xcassets]
+    info:
+      path: Info.plist
+    entitlements:
+      path: EverythingMac.entitlements
+    dependencies:
+      - package: IndexCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.everythingmac.app
+        MARKETING_VERSION: "0.1.0"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: EverythingMac.entitlements
+        SWIFT_VERSION: "6.0"
+        # Sign with a stable Apple Development identity (not ad-hoc). Ad-hoc gives a
+        # fresh cdhash every rebuild, and TCC/Full Disk Access grants by cdhash for
+        # unsigned apps — so each rebuild silently drops the grant. A real signing
+        # identity makes TCC key the grant on the designated requirement (bundle id
+        # + team + cert), so Full Disk Access persists across rebuilds. Empty
+        # entitlements + non-sandboxed → no provisioning profile needed locally.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Apple Development: ALEJANDRO SLOAN (Q4Q986239Z)"
+        DEVELOPMENT_TEAM: KP9ZZ6LGDK

@@ -1,0 +1,22 @@
+# Build artifacts
+.build/
+DerivedData/
+App/build/
+App/EverythingMac.app
+
+# XcodeGen output (regenerated from App/project.yml by scripts/build-dev.sh)
+*.xcodeproj
+*.xcworkspace
+.swiftpm/
+
+# Tests (not needed to build or run the app; Package.swift wires them in only
+# when the Tests directory is present)
+Tests/
+
+# macOS, logs, crash dumps
+.DS_Store
+*.log
+*.crash
+
+# Internal design/planning notes (not needed to build or use the app)
+docs/
