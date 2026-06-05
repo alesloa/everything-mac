@@ -1,33 +1,33 @@
 # EverythingMac
 
-Instant filename search for macOS. Start typing and every matching file and folder on every mounted volume shows up as you press each key — the way [Everything](https://www.voidtools.com/) works on Windows.
+Type part of a filename and every file and folder that matches shows up instantly, across every mounted volume. It's a macOS clone of [Everything](https://www.voidtools.com/), the search tool I lived in back on Windows.
 
-> The folder is named `everything-rust` for historical reasons. The app is written entirely in **Swift / SwiftUI / AppKit**.
+> The folder is called `everything-rust` for historical reasons. There's no Rust in it. The whole app is Swift (SwiftUI and AppKit).
 
-## Why I made this
+## Why I built it
 
-I came to Mac from Windows. On Windows I lived in **Everything** by voidtools — hit a shortcut, type part of a name, and it instantly lists every file and folder that matches across the whole disk. No spinner, no guessing, no "did it index yet."
+I switched to Mac from Windows, and the one tool I missed right away was Everything by voidtools. Hit a shortcut, type a few letters, and it lists every matching file and folder on the whole disk before you finish typing. It doesn't make you wait while it builds an index, and it doesn't reshuffle the results to show you what it thinks you meant.
 
-macOS Spotlight is supposed to do this. It doesn't, not well. When I search for a **folder** it often won't show all the folders that actually match — it hides things, ranks them strangely, and makes me dig. I'm a programmer. I don't have time to fight my own search tool. Finding a file or a folder is the most basic thing a computer should do, and it should *just always work*.
+Spotlight is supposed to cover this. It doesn't, at least not for me. The part that broke it was folder search: I'd look for a folder I knew was there and Spotlight wouldn't list all the ones that matched. It buries results and second-guesses what I actually typed. I'm a programmer. Finding a file by name is the most basic thing a computer does, and I don't want to fight it to do that.
 
-So I built this: a small, fast, native app that indexes every filename on the machine and searches it instantly. Open it, type, find it, done. Need to open something? Right-click and open it with whatever app you want.
+So I wrote my own. It reads every filename on the machine into memory and searches that as you type. Open it, type, it's there. Want to open the file? Right-click and pick whatever app you want.
 
 ## What it does
 
-- **Instant search** across all mounted volumes — results update on every keystroke.
-- Indexes the **whole disk** (files *and* folders), kept live with the filesystem via FSEvents.
-- Classic results table: **Name · Path · Size · Kind · Date Modified** — click any column to sort.
-- **File-type icons** and human-readable kinds.
-- **Right-click menu:** Open · Open With ▸ (every associated app, plus a *Choose Application…* picker so you can open anything with any app) · Reveal in Finder · Copy Path · Copy Name · Move to Trash.
-- Stays fast on millions of files — custom flat index, parallel substring scan, bounded top-K sort.
+- Searches every mounted volume, updating on each keystroke.
+- Indexes the whole disk, files and folders, and keeps the index current through FSEvents.
+- Standard results table with Name, Path, Size, Kind, and Date Modified. Click a header to sort.
+- Shows the real file-type icon and a readable kind for each row.
+- Right-click menu: Open, Open With (lists every app associated with the file, plus a "Choose Application…" option to open it with anything), Reveal in Finder, Copy Path, Copy Name, Move to Trash.
+- Handles millions of files without choking. The index is a flat array scanned in parallel across all cores.
 
 ## Requirements
 
-- macOS 14 (Sonoma) or later
-- Xcode 16 or later (Swift 6 toolchain)
+- macOS 14 (Sonoma) or newer
+- Xcode 16 or newer (Swift 6)
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
 
-## Build & run
+## Build and run
 
 ```bash
 git clone https://github.com/alesloa/everything-mac.git
@@ -35,34 +35,32 @@ cd everything-mac
 ./scripts/build-dev.sh
 ```
 
-`build-dev.sh` generates the Xcode project from `App/project.yml`, builds a **Release** binary (the search loop is ~100× slower unoptimized — always build Release), and copies the app to `/Applications/EverythingMac.app`.
+The script generates the Xcode project from `App/project.yml`, builds a Release binary, and copies the app into `/Applications`. Build Release, not Debug. The search loop runs about 100x slower without optimization.
 
-### Code signing (for your own build)
+### Signing it as yourself
 
-`App/project.yml` ships with *my* Apple Development identity so Full Disk Access survives rebuilds on my machine. To build on yours, do one of:
+`App/project.yml` has my Apple Development identity hardcoded so Full Disk Access doesn't get revoked every time I rebuild on my own machine. To build it on yours, do one of these:
 
-- Open `App/EverythingMac.xcodeproj` in Xcode → select the **EverythingMac** target → **Signing & Capabilities** → enable *Automatically manage signing* and choose your own Team; or
-- Edit `CODE_SIGN_IDENTITY` and `DEVELOPMENT_TEAM` in `App/project.yml` to your own values, then re-run `./scripts/build-dev.sh`.
+- Open `App/EverythingMac.xcodeproj` in Xcode, select the EverythingMac target, go to Signing & Capabilities, turn on "Automatically manage signing," and pick your team.
+- Or edit `CODE_SIGN_IDENTITY` and `DEVELOPMENT_TEAM` in `App/project.yml` to your own values and re-run `./scripts/build-dev.sh`.
 
-### Grant Full Disk Access
+### Full Disk Access
 
-To index everything, the app needs Full Disk Access:
+The app can only index everything if you give it Full Disk Access:
 
-**System Settings → Privacy & Security → Full Disk Access** → enable **EverythingMac**.
+System Settings > Privacy & Security > Full Disk Access > turn on EverythingMac.
 
-On first launch it scans the whole disk (a few minutes, depending on how many files you have) and caches the index, so later launches start instantly. Filesystem changes are picked up live.
+The first launch scans the whole disk and writes the index to a cache, so it takes a few minutes depending on how many files you have. After that it starts instantly and picks up file changes as they happen.
 
-## Usage
+## Using it
 
-- Launch EverythingMac and start typing — matches appear immediately.
-- Click a column header to sort by Name / Path / Size / Kind / Date Modified.
-- Double-click a row to open it. Right-click for **Open With**, Reveal in Finder, Copy Path, Move to Trash, and more.
+Launch it and start typing. Matches show up right away. Click a column header to sort. Double-click a row to open it, or right-click for Open With, Reveal in Finder, Copy Path, Move to Trash, and the rest.
 
-## How it works (short version)
+## How it works
 
-- A flat **struct-of-arrays index** holds every filename in one contiguous UTF-8 arena with parallel metadata arrays, serialized to a binary cache for fast restarts.
-- Search is a **parallel substring scan** across all cores feeding a **bounded max-heap** for the top results, so typing stays instant even with millions of records.
-- A live **FSEvents** monitor reconciles new / renamed / deleted files into the index without a full rescan.
+- Every filename lives in one big UTF-8 buffer, with the metadata (size, dates, flags) held in parallel arrays alongside it. That whole structure gets written to a binary cache so restarts are fast.
+- A search runs as a parallel substring scan across all CPU cores, feeding a fixed-size max-heap that keeps only the top results. That's what keeps typing responsive even with millions of records.
+- An FSEvents watcher folds new, renamed, and deleted files back into the index so it never needs a full rescan.
 
 ## License
 
