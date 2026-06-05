@@ -4,7 +4,11 @@ Type part of a filename and every file and folder that matches shows up instantl
 
 ![EverythingMac searching across 8.2 million files](assets/screenshot.png)
 
+**[Download the latest release](https://github.com/alesloa/everything-mac/releases/latest)** (macOS 14+), or [build it from source](#build-and-run).
+
 > The folder is called `everything-rust` for historical reasons. There's no Rust in it. The whole app is Swift (SwiftUI and AppKit).
+>
+> This build isn't notarized by Apple, so on first open macOS will block it. Either run `xattr -dr com.apple.quarantine /Applications/EverythingMac.app`, or right-click the app and choose Open. See the [release notes](https://github.com/alesloa/everything-mac/releases/latest) for details.
 
 ## Why I built it
 
