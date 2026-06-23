@@ -21,6 +21,8 @@ public struct FileStore: Sendable {
     // core for tens of seconds and starves search. Derived (not serialized);
     // rebuilt on binary load and maintained on append.
     private var childrenByParent: [UInt32: [UInt32]] = [:]
+    // dir id → last-reconciled mtime (ns). Derived, not serialized; see reconcileMtime.
+    private var dirReconcileMtime: [UInt32: Int64] = [:]
     public private(set) var rootID: UInt32 = .max
 
     // Count of tombstoned (deleted) records. Lets the empty-query path return the
@@ -145,6 +147,13 @@ public struct FileStore: Sendable {
     public mutating func markDeleted(_ id: UInt32) {
         if live[Int(id)] { live[Int(id)] = false; deletedCount += 1 }
     }
+
+    /// Live-reconcile fast path: the mtime (nanoseconds) a directory was last
+    /// reconciled at. Repeat FSEvents whose dir mtime is unchanged take a cheap skip
+    /// instead of re-reading the directory. nil until a dir's first reconcile this
+    /// session, so the first event always reconciles in full — no same-second miss.
+    public func reconcileMtime(of id: UInt32) -> Int64? { dirReconcileMtime[id] }
+    public mutating func setReconcileMtime(_ id: UInt32, _ nsec: Int64) { dirReconcileMtime[id] = nsec }
 
     public func childIDs(of parent: UInt32) -> [UInt32] {
         guard let kids = childrenByParent[parent] else { return [] }

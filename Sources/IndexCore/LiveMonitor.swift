@@ -35,6 +35,19 @@ public final class LiveMonitor: @unchecked Sendable {
                                  rules: ExcludeRules, volID: UInt32,
                                  newlyIndexedDirs: inout Set<String>) -> Bool {
         guard let dirID = store.idForDirPath(directory) else { return false }
+
+        // Cheap gate: a directory's mtime advances only when its entries are
+        // added/removed/renamed, NOT when a file's contents change. Most FSEvents are
+        // content modifications (logs, caches, databases), so once we've reconciled a
+        // dir, repeat events whose mtime is unchanged skip the expensive readdir+diff.
+        // This is what keeps live-update CPU flat under heavy filesystem churn.
+        // Nanosecond precision, and nil on a dir's first event (so nothing is missed).
+        var dst = stat()
+        let haveStat = stat(directory, &dst) == 0
+        let diskMtimeNs = haveStat
+            ? Int64(dst.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(dst.st_mtimespec.tv_nsec) : 0
+        if haveStat, store.reconcileMtime(of: dirID) == diskMtimeNs { return false }
+
         let existing = store.childIDs(of: dirID)
 
         guard let dir = opendir(directory) else {
@@ -59,13 +72,21 @@ public final class LiveMonitor: @unchecked Sendable {
             if ExcludeRules.projectMarkers.contains(name) { inProjectDir = true }
         }
 
+        // Live child names as a Set so the per-entry "is this new?" check below is O(1).
+        // childID(named:) is a linear scan that decodes a String per comparison, i.e.
+        // O(entries · children) per reconcile — quadratic, which pegged a core when a
+        // big, busy directory (a browser cache with thousands of files) reconciled on
+        // every add/remove. Building one Set makes the whole diff O(entries + children).
+        var existingNames = Set<String>(minimumCapacity: existing.count)
+        for id in existing { existingNames.insert(store.name(of: id)) }
+
         var onDisk = Set<String>()
         var changed = false
         for name in names {
             let full = (directory as NSString).appendingPathComponent(name)
             if rules.shouldExclude(name: name, path: full, isHidden: name.hasPrefix("."), inProjectDir: inProjectDir) { continue }
             onDisk.insert(name)
-            if store.childID(named: name, under: dirID) == nil {
+            if !existingNames.contains(name) {
                 var st = stat()
                 guard lstat(full, &st) == 0 else { continue }
                 let isDir = (st.st_mode & S_IFMT) == S_IFDIR
@@ -88,6 +109,9 @@ public final class LiveMonitor: @unchecked Sendable {
             markSubtreeDeleted(id, in: &store)
             changed = true
         }
+        // Remember the mtime we just reconciled at so repeat events for this dir
+        // (with the same mtime) take the cheap skip above instead of re-reading it.
+        if haveStat { store.setReconcileMtime(dirID, diskMtimeNs) }
         return changed
     }
 
