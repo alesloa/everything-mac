@@ -4,6 +4,11 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [0.2.2] - 2026-06-23
+
+### Fixed
+- High CPU during normal use. The live-update watcher re-read a whole directory on every filesystem event, and its per-entry "is this new?" check was a linear scan — so the diff was quadratic, and a big busy folder (like a browser cache) pegged a CPU core. The diff is now linear, and directories whose entries didn't change are skipped entirely (a directory-mtime check), so idle CPU drops to near zero while new, renamed, and deleted files are still picked up.
+
 ## [0.2.1] - 2026-06-23
 
 ### Fixed
@@ -26,6 +31,7 @@ All notable changes to EverythingMac are recorded here. The format is based on
 ### Added
 - First public release. Instant filename and folder search across every mounted volume, updating as you type. FSEvents-backed live index, a binary on-disk cache for instant restarts, and right-click actions (Open, Open With, Reveal in Finder, Copy Path/Name, Move to Trash).
 
+[0.2.2]: https://github.com/alesloa/everything-mac/releases/tag/v0.2.2
 [0.2.1]: https://github.com/alesloa/everything-mac/releases/tag/v0.2.1
 [0.2.0]: https://github.com/alesloa/everything-mac/releases/tag/v0.2.0
 [0.1.0]: https://github.com/alesloa/everything-mac/releases/tag/v0.1.0
