@@ -31,6 +31,11 @@ public struct Scanner: Sendable {
         guard let dir = opendir(path) else { return }
         defer { closedir(dir) }
 
+        // First pass: collect names and detect whether this directory is a project
+        // root (holds a marker like Cargo.toml/package.json/.git), so the generic
+        // marker-scoped dev-folder names are skipped here but not in plain user dirs.
+        var names: [String] = []
+        var inProjectDir = false
         while let entp = readdir(dir) {
             // Extract the null-terminated name from the fixed-size d_name tuple.
             let name = withUnsafePointer(to: entp.pointee.d_name) {
@@ -39,11 +44,15 @@ public struct Scanner: Sendable {
                 }
             }
             guard name != "." && name != ".." else { continue }
+            names.append(name)
+            if ExcludeRules.projectMarkers.contains(name) { inProjectDir = true }
+        }
 
+        for name in names {
             let full = (path as NSString).appendingPathComponent(name)
             let isHidden = name.hasPrefix(".")
 
-            if rules.shouldExclude(name: name, path: full, isHidden: isHidden) { continue }
+            if rules.shouldExclude(name: name, path: full, isHidden: isHidden, inProjectDir: inProjectDir) { continue }
 
             var st = stat()
             guard lstat(full, &st) == 0 else { continue }

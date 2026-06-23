@@ -107,18 +107,31 @@ public enum ParallelScanner {
     // One directory level: readdir + lstat each entry, applying exclude rules.
     // lstat (not stat) means symlinked directories are recorded but never
     // descended into, so the firmlink/symlink graph can't create scan loops.
+    //
+    // Two passes: the first reads names only (no stat) and notes whether this
+    // directory holds a project marker (Cargo.toml/package.json/.git/…); the second
+    // applies the now-marker-aware exclude rules and stats only the survivors. The
+    // marker pass is what lets generic names like "build"/"target" be skipped inside
+    // a real project but kept for an unrelated user folder of the same name.
     private static func readDirectory(_ path: String, rules: ExcludeRules) -> [Entry] {
         guard let dir = opendir(path) else { return [] }
         defer { closedir(dir) }
-        var out: [Entry] = []
+        var names: [String] = []
+        var inProjectDir = false
         while let entp = readdir(dir) {
             let name = withUnsafePointer(to: entp.pointee.d_name) {
                 $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX)) { String(cString: $0) }
             }
             if name == "." || name == ".." { continue }
+            names.append(name)
+            if ExcludeRules.projectMarkers.contains(name) { inProjectDir = true }
+        }
+        var out: [Entry] = []
+        out.reserveCapacity(names.count)
+        for name in names {
             let full = path == "/" ? "/" + name : path + "/" + name
             let isHidden = name.hasPrefix(".")
-            if rules.shouldExclude(name: name, path: full, isHidden: isHidden) { continue }
+            if rules.shouldExclude(name: name, path: full, isHidden: isHidden, inProjectDir: inProjectDir) { continue }
             var st = stat()
             guard lstat(full, &st) == 0 else { continue }
             let isDir = (st.st_mode & S_IFMT) == S_IFDIR
