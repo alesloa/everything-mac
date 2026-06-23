@@ -4,6 +4,11 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [0.2.1] - 2026-06-23
+
+### Fixed
+- Indexing no longer hangs when a network share is mounted. The scan used to descend into SMB/NFS shares under `/Volumes` and stall on slow network reads (one mounted share with millions of files froze it indefinitely). Network volumes are now skipped — local volumes only.
+
 ## [0.2.0] - 2026-06-23
 
 ### Added
@@ -21,5 +26,6 @@ All notable changes to EverythingMac are recorded here. The format is based on
 ### Added
 - First public release. Instant filename and folder search across every mounted volume, updating as you type. FSEvents-backed live index, a binary on-disk cache for instant restarts, and right-click actions (Open, Open With, Reveal in Finder, Copy Path/Name, Move to Trash).
 
+[0.2.1]: https://github.com/alesloa/everything-mac/releases/tag/v0.2.1
 [0.2.0]: https://github.com/alesloa/everything-mac/releases/tag/v0.2.0
 [0.1.0]: https://github.com/alesloa/everything-mac/releases/tag/v0.1.0
