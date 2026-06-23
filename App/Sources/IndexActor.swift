@@ -88,8 +88,31 @@ actor IndexActor {
         // future ExcludeRules property is carried through automatically instead of
         // being silently dropped back to its default on the scan path.
         var effective = rules
-        effective.pathPrefixes += firmlinkBackDoors
+        // Also skip network (non-local) mounts. Crawling an SMB/NFS share does one
+        // network round-trip per lstat and an smbfs readdir blocks in uninterruptible
+        // I/O — a single mounted share with millions of files hangs the whole scan.
+        effective.pathPrefixes += firmlinkBackDoors + Self.nonLocalMountPaths()
         return effective
+    }
+
+    // Mount points of non-local (network) filesystems — SMB/NFS/AFP/WebDAV shares.
+    // getmntinfo with MNT_NOWAIT reads the kernel's cached mount table and never
+    // itself touches the network (MNT_WAIT would refresh stats and could block on a
+    // stalled mount). MNT_LOCAL is set only for filesystems stored on local media.
+    static func nonLocalMountPaths() -> [String] {
+        var mntbuf: UnsafeMutablePointer<statfs>? = nil
+        let count = getmntinfo(&mntbuf, MNT_NOWAIT)
+        guard count > 0, let mntbuf else { return [] }
+        var out: [String] = []
+        for i in 0..<Int(count) {
+            var fs = mntbuf[i]
+            if (fs.f_flags & UInt32(MNT_LOCAL)) != 0 { continue } // local → index it
+            let path = withUnsafePointer(to: &fs.f_mntonname) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+            }
+            out.append(path)
+        }
+        return out
     }
 
     // Rebuild the whole index from "/". The walk runs OFF the actor on a pool of
@@ -148,9 +171,13 @@ actor IndexActor {
     // /Volumes is a symlink — lstat skips it (S_IFLNK), so it isn't double-watched.
     private func watchPaths() -> [String] {
         var paths = ["/"]
+        // Network shares are skipped (checked BEFORE lstat — stat'ing a network mount
+        // point itself can block), matching the scan, which doesn't index them.
+        let networkMounts = Set(Self.nonLocalMountPaths())
         if let vols = try? FileManager.default.contentsOfDirectory(atPath: "/Volumes") {
             for v in vols.sorted() {
                 let p = "/Volumes/" + v
+                if networkMounts.contains(p) { continue }
                 var st = stat()
                 if lstat(p, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR { paths.append(p) }
             }
