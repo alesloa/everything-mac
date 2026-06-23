@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct ResultsTable: NSViewRepresentable {
     var rows: [FileRecord]
     var onSort: (QueryEngine.SortKey, Bool) -> Void
+    var onSelect: (FileRecord?) -> Void
     var onActivate: (FileRecord) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -70,6 +71,12 @@ struct ResultsTable: NSViewRepresentable {
             return coord.parent.rows[t.selectedRow].id
         }()
         coord.parent = self
+        // Suppress the selection callback across reload+reselect: reloadData clears the
+        // selection (a spurious "nothing selected") and the reselect below re-sets the
+        // SAME file — neither is a user action, and firing onSelect here would mutate
+        // published model state mid-view-update. Genuine clicks happen outside this.
+        coord.suppressSelectionCallback = true
+        defer { coord.suppressSelectionCallback = false }
         table?.reloadData()
         if let id = selectedID, let t = table,
            let row = rows.firstIndex(where: { $0.id == id }) {
@@ -81,9 +88,18 @@ struct ResultsTable: NSViewRepresentable {
         var parent: ResultsTable
         weak var table: NSTableView?
         weak var openWithMenu: NSMenu?
+        var suppressSelectionCallback = false
         init(_ p: ResultsTable) { parent = p }
 
         func numberOfRows(in tableView: NSTableView) -> Int { parent.rows.count }
+
+        // Report the user's row pick up to the model so the menu bar can act on it.
+        // Skipped during programmatic reselection (see updateNSView).
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            guard !suppressSelectionCallback, let t = table else { return }
+            let r = t.selectedRow
+            parent.onSelect(r >= 0 && r < parent.rows.count ? parent.rows[r] : nil)
+        }
 
         func tableView(_ t: NSTableView, viewFor col: NSTableColumn?, row: Int) -> NSView? {
             let rec = parent.rows[row]
@@ -149,8 +165,10 @@ struct ResultsTable: NSViewRepresentable {
         }
 
         func tableView(_ t: NSTableView, sortDescriptorsDidChange old: [NSSortDescriptor]) {
-            guard let d = t.sortDescriptors.first, let k = d.key else { return }
+            IndexActor.dlog("sortDidChange descs=\(t.sortDescriptors.map { "\($0.key ?? "nil"):\($0.ascending)" }) old=\(old.map { $0.key ?? "nil" })")
+            guard let d = t.sortDescriptors.first, let k = d.key else { IndexActor.dlog("  no first descriptor -> ignored"); return }
             let key: QueryEngine.SortKey = ["name":.name,"path":.path,"size":.size,"kind":.kind,"mtime":.mtime][k] ?? .name
+            IndexActor.dlog("  -> onSort key=\(k) asc=\(d.ascending)")
             parent.onSort(key, d.ascending)
         }
 

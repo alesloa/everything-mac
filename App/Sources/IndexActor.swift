@@ -32,6 +32,17 @@ actor IndexActor {
 
     var totalCount: Int { store.count }
 
+    // TEMP DIAGNOSTIC — remove before commit. Appends a line to /tmp/ec-fsdebug.log.
+    nonisolated static func dlog(_ s: String) {
+        guard let data = (s + "\n").data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: "/tmp/ec-fsdebug.log")
+        if let h = try? FileHandle(forWritingTo: url) {
+            h.seekToEndOfFile(); h.write(data); try? h.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
     // ~/Library/Application Support/Everything-Mac/index.idx
     static func cacheURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -160,7 +171,9 @@ actor IndexActor {
             guard let self else { return }
             Task { await self.applyChanges(changes) }
         })
-        m.start(paths: watchPaths(), sinceWhen: FSEventStreamEventId(lastEventID))
+        let wp = watchPaths()
+        Self.dlog("startMonitor paths=\(wp) sinceWhen=\(lastEventID)")
+        m.start(paths: wp, sinceWhen: FSEventStreamEventId(lastEventID))
         monitor = m
     }
 
@@ -170,7 +183,13 @@ actor IndexActor {
     // on them (e.g. an external/secondary disk). The boot volume's own entry in
     // /Volumes is a symlink — lstat skips it (S_IFLNK), so it isn't double-watched.
     private func watchPaths() -> [String] {
-        var paths = ["/"]
+        // "/" is the sealed, read-only System volume; the writable Data volume — home,
+        // /Users, /private, /Applications — is mounted at /System/Volumes/Data, and its
+        // live changes are NOT delivered through a "/" watch (only via slow coalesced
+        // rescans every few minutes, which is why new files in the home folder took
+        // minutes to appear). Watch the Data volume directly so home-folder changes are
+        // instant; applyChanges maps the /System/Volumes/Data prefix back to canonical.
+        var paths = ["/", "/System/Volumes/Data"]
         // Network shares are skipped (checked BEFORE lstat — stat'ing a network mount
         // point itself can block), matching the scan, which doesn't index them.
         let networkMounts = Set(Self.nonLocalMountPaths())
@@ -195,6 +214,16 @@ actor IndexActor {
     // subtree. Only an actual add/remove triggers a re-search: ambient file
     // modifications change nothing and must not peg the CPU.
     func applyChanges(_ changes: [LiveMonitor.FSChange]) {
+        // Map firmlink-aliased Data-volume paths (/System/Volumes/Data/...) back to
+        // canonical "/..." so home-folder changes resolve against the index.
+        let changes = changes.map {
+            LiveMonitor.FSChange(path: LiveMonitor.canonicalEventPath($0.path),
+                                 mustScanSubtree: $0.mustScanSubtree)
+        }
+        Self.dlog("batch n=\(changes.count)")
+        for c in changes where c.path.contains("/Users") || c.mustScanSubtree {
+            Self.dlog("  recv \(c.path) mustScan=\(c.mustScanSubtree) idFound=\(store.idForDirPath(c.path) != nil)")
+        }
         var deep = Set<String>()
         for c in changes where c.mustScanSubtree { deep.insert(c.path) }
         let dirs = Set(changes.map { $0.path }).sorted()
@@ -206,6 +235,29 @@ actor IndexActor {
                 ? LiveMonitor.reconcileTree(directory: d, in: &store, rules: rules, volID: 1, newlyIndexedDirs: &newlyIndexed)
                 : LiveMonitor.reconcile(directory: d, in: &store, rules: rules, volID: 1, newlyIndexedDirs: &newlyIndexed)
             if didChange { changed = true }
+        }
+        guard changed else { return }
+        Self.dlog("  -> CHANGED, onLiveChange fired")
+        cachedQueryKey = nil
+        onLiveChange?()
+    }
+
+    // Safety net for iCloud "Desktop & Documents" (FileProvider) folders: macOS does
+    // NOT deliver FSEvents for these the way it does ordinary folders, so files
+    // created/deleted on the Desktop or in Documents/Downloads can lag minutes behind
+    // (only coarse coalesced rescans eventually catch them). Periodically re-read just
+    // these few user-facing folders directly. Cost is trivial — each unchanged folder
+    // is gated to a single lstat by reconcile's mtime check; a folder only gets a full
+    // readdir when its contents actually changed. Shallow (one level) on purpose:
+    // reconcileTree would lstat the entire subtree every tick, which is not free.
+    func sweepUserFolders() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let targets = ["Desktop", "Documents", "Downloads"].map { home + "/" + $0 }
+        var newlyIndexed = Set<String>()
+        var changed = false
+        for dir in targets {
+            if LiveMonitor.reconcile(directory: dir, in: &store, rules: rules, volID: 1,
+                                     newlyIndexedDirs: &newlyIndexed) { changed = true }
         }
         guard changed else { return }
         cachedQueryKey = nil

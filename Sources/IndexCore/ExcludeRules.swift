@@ -12,15 +12,20 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
     // user can re-index a build dir to find one file WITHOUT also pulling every churny
     // .git blob on disk back into the index.
     public var excludeVCSFolders: Bool
+    // The Trash (~/.Trash and per-volume /.Trashes). A "deleted" file still turning up
+    // in search confuses users — the point of deleting is for it to be gone — so Trash
+    // is skipped by default; toggle off to search inside it.
+    public var excludeTrash: Bool
 
     public init(names: Set<String> = [], pathPrefixes: [String] = [],
                 excludeHidden: Bool = false, excludeDevFolders: Bool = true,
-                excludeVCSFolders: Bool = true) {
+                excludeVCSFolders: Bool = true, excludeTrash: Bool = true) {
         self.names = names
         self.pathPrefixes = pathPrefixes
         self.excludeHidden = excludeHidden
         self.excludeDevFolders = excludeDevFolders
         self.excludeVCSFolders = excludeVCSFolders
+        self.excludeTrash = excludeTrash
     }
 
     // Settings saved before excludeDevFolders/excludeVCSFolders existed lack those
@@ -29,7 +34,7 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
     // defaults). The three original fields are still hard-decoded — identical to the
     // synthesized conformance this replaces, so no pre-existing blob decodes worse.
     private enum CodingKeys: String, CodingKey {
-        case names, pathPrefixes, excludeHidden, excludeDevFolders, excludeVCSFolders
+        case names, pathPrefixes, excludeHidden, excludeDevFolders, excludeVCSFolders, excludeTrash
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -38,6 +43,7 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
         excludeHidden = try c.decode(Bool.self, forKey: .excludeHidden)
         excludeDevFolders = try c.decodeIfPresent(Bool.self, forKey: .excludeDevFolders) ?? true
         excludeVCSFolders = try c.decodeIfPresent(Bool.self, forKey: .excludeVCSFolders) ?? true
+        excludeTrash = try c.decodeIfPresent(Bool.self, forKey: .excludeTrash) ?? true
     }
 
     // Unambiguous regenerable build output / dependency / tool-cache directories.

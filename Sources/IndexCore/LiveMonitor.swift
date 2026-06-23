@@ -147,6 +147,19 @@ public final class LiveMonitor: @unchecked Sendable {
         return changed
     }
 
+    // FSEvents reports changes on the Data volume under its firmlink mount point
+    // "/System/Volumes/Data", but the whole-disk index is rooted at the canonical
+    // "/" (the Data volume's content appears directly under / via firmlinks, and the
+    // scan deliberately skips the /System/Volumes/Data back-door to avoid double
+    // indexing). Map a delivered Data-volume path back to its canonical form so
+    // reconcile can resolve it against the store. Non-Data paths pass through.
+    public static func canonicalEventPath(_ path: String) -> String {
+        let alias = "/System/Volumes/Data"
+        if path == alias { return "/" }
+        if path.hasPrefix(alias + "/") { return String(path.dropFirst(alias.count)) }
+        return path
+    }
+
     private static func markSubtreeDeleted(_ id: UInt32, in store: inout FileStore) {
         store.markDeleted(id)
         for child in store.childIDs(of: id) {

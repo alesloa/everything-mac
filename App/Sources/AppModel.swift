@@ -12,11 +12,21 @@ final class AppModel: ObservableObject {
     @Published var matchPath = false
     @Published var rules: ExcludeRules = .defaults
     @Published var scanning = false
+    @Published var selectedID: UInt32?
+    // Bumped to ask the focused window to put the cursor in the search field (⌘F /
+    // File ▸ Find). A counter, not a Bool, so repeated requests always fire onChange.
+    @Published var focusSearchSignal = 0
+
+    // The currently-selected result, resolved by stable store id against the live
+    // result set. nil once the file drops out of results, which auto-disables the
+    // selection-dependent menu items.
+    var selected: FileRecord? { selectedID.flatMap { id in results.first { $0.id == id } } }
 
     let index = IndexActor()
     private var task: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
     private var flushTimer: Task<Void, Never>?
+    private var cloudSweepTimer: Task<Void, Never>?
     private var searchSeq = 0
 
     func bootstrap() {
@@ -34,6 +44,19 @@ final class AppModel: ObservableObject {
             rules = await index.currentRules()
             await runSearch()
             startFlushTimer()
+            startCloudSweep()
+        }
+    }
+
+    // iCloud "Desktop & Documents" folders don't emit FSEvents, so poll them directly
+    // every 2s as a safety net (see IndexActor.sweepUserFolders — near-zero cost).
+    private func startCloudSweep() {
+        cloudSweepTimer = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s
+                if Task.isCancelled { return }
+                await index.sweepUserFolders()
+            }
         }
     }
 
@@ -60,6 +83,7 @@ final class AppModel: ObservableObject {
         searchSeq &+= 1
         let mySeq = searchSeq
         let r = await index.search(query, matchPath: matchPath, sort: sortKey, ascending: ascending)
+        IndexActor.dlog("runSearch seq=\(mySeq)/cur=\(searchSeq) sort=\(sortKey) asc=\(ascending) q='\(query)' -> \(r.count) rows first=\(r.first?.name ?? "-") published=\(mySeq == searchSeq && !Task.isCancelled)")
         // Only the most recently started search may publish — stops a slower
         // in-flight search (e.g. from a live-refresh tick) clobbering newer
         // results with a stale sort order.
@@ -88,6 +112,23 @@ final class AppModel: ObservableObject {
                 if Task.isCancelled { return }
                 await index.flush()
             }
+        }
+    }
+
+    func focusSearch() { focusSearchSignal &+= 1 }
+
+    // Force a full whole-disk rescan (File ▸ Rebuild Index). Same shape as applyRules
+    // but without changing the exclude rules — for when the index drifts or the user
+    // wants to be sure it's fresh. Persists the result so the next launch matches.
+    func rebuildIndex() {
+        guard !scanning else { return }
+        Task {
+            scanning = true
+            await index.rescanAll()
+            await index.flush()
+            scanning = false
+            total = await index.totalCount
+            await runSearch()
         }
     }
 
