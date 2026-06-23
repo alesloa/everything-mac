@@ -165,10 +165,8 @@ struct ResultsTable: NSViewRepresentable {
         }
 
         func tableView(_ t: NSTableView, sortDescriptorsDidChange old: [NSSortDescriptor]) {
-            IndexActor.dlog("sortDidChange descs=\(t.sortDescriptors.map { "\($0.key ?? "nil"):\($0.ascending)" }) old=\(old.map { $0.key ?? "nil" })")
-            guard let d = t.sortDescriptors.first, let k = d.key else { IndexActor.dlog("  no first descriptor -> ignored"); return }
+            guard let d = t.sortDescriptors.first, let k = d.key else { return }
             let key: QueryEngine.SortKey = ["name":.name,"path":.path,"size":.size,"kind":.kind,"mtime":.mtime][k] ?? .name
-            IndexActor.dlog("  -> onSort key=\(k) asc=\(d.ascending)")
             parent.onSort(key, d.ascending)
         }
 

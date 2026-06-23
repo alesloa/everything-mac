@@ -95,10 +95,9 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
     // Version-control metadata directories, gated by excludeVCSFolders.
     public static let vcsFolderNames: Set<String> = [".git", ".hg", ".svn"]
 
-    // Trash containers, gated by excludeTrash. ".Trash" is the per-user home trash;
-    // ".Trashes" is the per-volume trash at a volume root. Matched by name at any
-    // depth (same approach as VCS/dev names) — a stray user folder literally named
-    // ".Trash" is a non-issue in practice.
+    // Trash directories, gated by excludeTrash. ".Trash" is the per-user Trash
+    // (~/.Trash); ".Trashes" is the per-volume Trash (/.Trashes, /Volumes/*/.Trashes).
+    // Skipped by exact name at any depth — no real user folder is named either.
     public static let trashFolderNames: Set<String> = [".Trash", ".Trashes"]
 
     public static let defaults = ExcludeRules(
@@ -106,7 +105,8 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
         pathPrefixes: ["/private/var/folders", "/System/Volumes/Data/private/var/folders"],
         excludeHidden: false,
         excludeDevFolders: true,
-        excludeVCSFolders: true
+        excludeVCSFolders: true,
+        excludeTrash: true
     )
 
     /// `inProjectDir` must be true when the directory being listed contains a project

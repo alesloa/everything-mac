@@ -102,7 +102,6 @@ final class AppModel: ObservableObject {
         let mySeq = searchSeq
         let r = await index.search(query, matchPath: matchPath, caseInsensitive: !caseSensitive,
                                    wholeWord: wholeWord, sort: sortKey, ascending: ascending, limit: resultLimit)
-        IndexActor.dlog("runSearch seq=\(mySeq)/cur=\(searchSeq) sort=\(sortKey) asc=\(ascending) q='\(query)' -> \(r.count) rows first=\(r.first?.name ?? "-") published=\(mySeq == searchSeq && !Task.isCancelled)")
         // Only the most recently started search may publish — stops a slower
         // in-flight search (e.g. from a live-refresh tick) clobbering newer
         // results with a stale sort order.

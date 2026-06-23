@@ -32,17 +32,6 @@ actor IndexActor {
 
     var totalCount: Int { store.count }
 
-    // TEMP DIAGNOSTIC — remove before commit. Appends a line to /tmp/ec-fsdebug.log.
-    nonisolated static func dlog(_ s: String) {
-        guard let data = (s + "\n").data(using: .utf8) else { return }
-        let url = URL(fileURLWithPath: "/tmp/ec-fsdebug.log")
-        if let h = try? FileHandle(forWritingTo: url) {
-            h.seekToEndOfFile(); h.write(data); try? h.close()
-        } else {
-            try? data.write(to: url)
-        }
-    }
-
     // ~/Library/Application Support/Everything-Mac/index.idx
     static func cacheURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -175,9 +164,7 @@ actor IndexActor {
             guard let self else { return }
             Task { await self.applyChanges(changes) }
         })
-        let wp = watchPaths()
-        Self.dlog("startMonitor paths=\(wp) sinceWhen=\(lastEventID)")
-        m.start(paths: wp, sinceWhen: FSEventStreamEventId(lastEventID))
+        m.start(paths: watchPaths(), sinceWhen: FSEventStreamEventId(lastEventID))
         monitor = m
     }
 
@@ -224,10 +211,6 @@ actor IndexActor {
             LiveMonitor.FSChange(path: LiveMonitor.canonicalEventPath($0.path),
                                  mustScanSubtree: $0.mustScanSubtree)
         }
-        Self.dlog("batch n=\(changes.count)")
-        for c in changes where c.path.contains("/Users") || c.mustScanSubtree {
-            Self.dlog("  recv \(c.path) mustScan=\(c.mustScanSubtree) idFound=\(store.idForDirPath(c.path) != nil)")
-        }
         var deep = Set<String>()
         for c in changes where c.mustScanSubtree { deep.insert(c.path) }
         let dirs = Set(changes.map { $0.path }).sorted()
@@ -241,7 +224,6 @@ actor IndexActor {
             if didChange { changed = true }
         }
         guard changed else { return }
-        Self.dlog("  -> CHANGED, onLiveChange fired")
         cachedQueryKey = nil
         onLiveChange?()
     }
