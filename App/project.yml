@@ -13,6 +13,9 @@ targets:
     sources: [Sources, Assets.xcassets]
     info:
       path: Info.plist
+      properties:
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
     entitlements:
       path: EverythingMac.entitlements
     dependencies:
@@ -20,7 +23,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.everythingmac.app
-        MARKETING_VERSION: "0.1.0"
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: "2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: EverythingMac.entitlements
         SWIFT_VERSION: "6.0"
