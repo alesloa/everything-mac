@@ -14,6 +14,7 @@ struct EverythingMacApp: App {
                     model.bootstrap()
                 }
         }
+        .commands { AppCommands(model: model) }
         Settings {
             SettingsView().environmentObject(model)
         }
