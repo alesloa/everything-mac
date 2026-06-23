@@ -86,7 +86,8 @@ actor IndexActor {
         ]
         return ExcludeRules(names: rules.names,
                             pathPrefixes: rules.pathPrefixes + firmlinkBackDoors,
-                            excludeHidden: rules.excludeHidden)
+                            excludeHidden: rules.excludeHidden,
+                            excludeDevFolders: rules.excludeDevFolders)
     }
 
     // Rebuild the whole index from "/". The walk runs OFF the actor on a pool of
@@ -124,9 +125,9 @@ actor IndexActor {
     }
 
     private func startMonitor() {
-        let m = LiveMonitor(onDirsChanged: { [weak self] dirs in
+        let m = LiveMonitor(onDirsChanged: { [weak self] paths in
             guard let self else { return }
-            Task { await self.applyChanges(dirs) }
+            Task { await self.applyChanges(paths) }
         })
         m.start(paths: watchPaths(), sinceWhen: FSEventStreamEventId(lastEventID))
         monitor = m
@@ -152,10 +153,28 @@ actor IndexActor {
     // Apply FSEvents deltas: re-scan each changed directory level, diff against
     // the store, append new entries (recursing into new subtrees) and tombstone
     // removed ones, then notify the model to refresh visible results.
-    func applyChanges(_ dirs: [String]) {
-        for d in dirs {
-            LiveMonitor.reconcile(directory: d, in: &store, rules: rules, volID: 1)
+    //
+    // FSEvents (with FileEvents) reports the path of each changed ITEM, but
+    // reconcile works one directory level at a time — a new/removed file only
+    // shows up when its PARENT directory is re-listed. So reconcile the containing
+    // directory of every change (and the item's own path too, to catch a changed
+    // directory's contents however the event was coalesced). Paths are deduped:
+    // a burst of events routinely lands in the same handful of directories.
+    func applyChanges(_ paths: [String]) {
+        var dirs = Set<String>()
+        for p in paths {
+            dirs.insert(p)
+            dirs.insert((p as NSString).deletingLastPathComponent)
         }
+        var changed = false
+        for d in dirs {
+            if LiveMonitor.reconcile(directory: d, in: &store, rules: rules, volID: 1) { changed = true }
+        }
+        // Only re-search when the index ACTUALLY changed. The vast majority of
+        // FSEvents are file modifications (logs, caches, temp files) that add and
+        // remove nothing — firing a full-index re-search on each of those is what
+        // pegged the CPU progressively over a long session. No change → no work.
+        guard changed else { return }
         cachedQueryKey = nil
         onLiveChange?()
     }

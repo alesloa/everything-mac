@@ -10,11 +10,17 @@ public final class LiveMonitor: @unchecked Sendable {
     }
 
     // Re-scan one directory level and apply create/delete diffs against the store.
+    // Returns whether anything was actually added or removed: the live path uses
+    // this to avoid re-searching the whole index on the constant stream of FSEvents
+    // that change nothing structural (file content modifications) — the difference
+    // between a flat idle cost and CPU that climbs the longer the app is open.
+    @discardableResult
     public static func reconcile(directory: String, in store: inout FileStore,
-                                 rules: ExcludeRules, volID: UInt32) {
-        guard let dirID = store.idForDirPath(directory) else { return }
+                                 rules: ExcludeRules, volID: UInt32) -> Bool {
+        guard let dirID = store.idForDirPath(directory) else { return false }
         let existing = store.childIDs(of: dirID)
         var onDisk = Set<String>()
+        var changed = false
         if let dir = opendir(directory) {
             defer { closedir(dir) }
             while let e = readdir(dir) {
@@ -31,6 +37,7 @@ public final class LiveMonitor: @unchecked Sendable {
                     let isDir = (st.st_mode & S_IFMT) == S_IFDIR
                     let newID = store.append(name: name, parent: dirID, size: UInt64(st.st_size),
                                              mtime: Int64(st.st_mtimespec.tv_sec), isDir: isDir, volID: volID)
+                    changed = true
                     // A newly-created directory can hold a whole subtree that
                     // FSEvents coalesced or reported out of parent-first order.
                     // Index it now so nested/bulk creation is never dropped.
@@ -44,7 +51,9 @@ public final class LiveMonitor: @unchecked Sendable {
             // Deleting a directory must tombstone its whole subtree, not just the
             // dir entry, or descendants linger as live ghost results.
             markSubtreeDeleted(id, in: &store)
+            changed = true
         }
+        return changed
     }
 
     private static func markSubtreeDeleted(_ id: UInt32, in store: inout FileStore) {
@@ -68,8 +77,13 @@ public final class LiveMonitor: @unchecked Sendable {
             let changed = (0..<count).compactMap { cfArray[$0] as? String }
             mon.onDirsChanged(changed)
         }
-        let flags = UInt32(kFSEventStreamCreateFlagFileEvents
-                           | kFSEventStreamCreateFlagNoDefer
+        // Directory-level events (NOT FileEvents). FSEvents coalesces and reports
+        // the DIRECTORY in which something changed rather than emitting one path per
+        // changed file — far fewer callbacks under heavy churn, and exactly the
+        // granularity reconcile wants (it re-lists a directory and diffs). FileEvents
+        // flooded the actor with an event per modified file and handed reconcile file
+        // paths it couldn't act on.
+        let flags = UInt32(kFSEventStreamCreateFlagNoDefer
                            | kFSEventStreamCreateFlagUseCFTypes)
         stream = FSEventStreamCreate(nil, cb, &ctx, paths as CFArray, sinceWhen, 0.3, flags)
         if let s = stream {
