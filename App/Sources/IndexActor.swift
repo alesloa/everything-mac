@@ -84,10 +84,12 @@ actor IndexActor {
             "/System/Volumes/iSCPreboot",
             "/System/Volumes/Hardware",
         ]
-        return ExcludeRules(names: rules.names,
-                            pathPrefixes: rules.pathPrefixes + firmlinkBackDoors,
-                            excludeHidden: rules.excludeHidden,
-                            excludeDevFolders: rules.excludeDevFolders)
+        // Copy + mutate one field rather than re-listing every field by hand, so a
+        // future ExcludeRules property is carried through automatically instead of
+        // being silently dropped back to its default on the scan path.
+        var effective = rules
+        effective.pathPrefixes += firmlinkBackDoors
+        return effective
     }
 
     // Rebuild the whole index from "/". The walk runs OFF the actor on a pool of
@@ -113,21 +115,27 @@ actor IndexActor {
         self.onLiveChange = onLiveChange
         self.onProgress = onProgress
         let url = Self.cacheURL()
-        if let (loaded, evid) = try? IndexCache.load(from: url), loaded.count > 0 {
+        let fingerprint = effectiveRules().fingerprint()
+        // Use the cache only if it was built with the SAME exclusion rules now in
+        // effect. Otherwise (e.g. an upgrade that turned dev-folder skipping on, or a
+        // changed exclude list) the cached index disagrees with the active rules and
+        // would keep serving folders that should now be hidden — rebuild instead.
+        if let (loaded, evid, savedFingerprint) = try? IndexCache.load(from: url),
+           loaded.count > 0, savedFingerprint == fingerprint {
             store = loaded
             lastEventID = evid
         } else {
             await rescanAll()
             lastEventID = FSEventsGetCurrentEventId()
-            try? IndexCache.save(store, to: url, lastEventID: lastEventID)
+            try? IndexCache.save(store, to: url, lastEventID: lastEventID, rulesFingerprint: fingerprint)
         }
         startMonitor()
     }
 
     private func startMonitor() {
-        let m = LiveMonitor(onDirsChanged: { [weak self] paths in
+        let m = LiveMonitor(onChanged: { [weak self] changes in
             guard let self else { return }
-            Task { await self.applyChanges(paths) }
+            Task { await self.applyChanges(changes) }
         })
         m.start(paths: watchPaths(), sinceWhen: FSEventStreamEventId(lastEventID))
         monitor = m
@@ -150,30 +158,28 @@ actor IndexActor {
         return paths
     }
 
-    // Apply FSEvents deltas: re-scan each changed directory level, diff against
-    // the store, append new entries (recursing into new subtrees) and tombstone
-    // removed ones, then notify the model to refresh visible results.
+    // Apply FSEvents deltas, then notify the model to refresh visible results.
     //
-    // FSEvents (with FileEvents) reports the path of each changed ITEM, but
-    // reconcile works one directory level at a time — a new/removed file only
-    // shows up when its PARENT directory is re-listed. So reconcile the containing
-    // directory of every change (and the item's own path too, to catch a changed
-    // directory's contents however the event was coalesced). Paths are deduped:
-    // a burst of events routinely lands in the same handful of directories.
-    func applyChanges(_ paths: [String]) {
-        var dirs = Set<String>()
-        for p in paths {
-            dirs.insert(p)
-            dirs.insert((p as NSString).deletingLastPathComponent)
-        }
+    // The stream is directory-level (see LiveMonitor.start): each reported path IS the
+    // directory whose contents changed, so reconcile it directly — no parent
+    // derivation. Paths are deduped and processed ancestors-first (lexicographic sort)
+    // so a brand-new subtree indexed by one event isn't re-listed by a sibling event
+    // in the same batch. MustScanSubDirs (coalescing overflow) re-diffs the whole
+    // subtree. Only an actual add/remove triggers a re-search: ambient file
+    // modifications change nothing and must not peg the CPU.
+    func applyChanges(_ changes: [LiveMonitor.FSChange]) {
+        var deep = Set<String>()
+        for c in changes where c.mustScanSubtree { deep.insert(c.path) }
+        let dirs = Set(changes.map { $0.path }).sorted()
+        var newlyIndexed = Set<String>()
         var changed = false
         for d in dirs {
-            if LiveMonitor.reconcile(directory: d, in: &store, rules: rules, volID: 1) { changed = true }
+            if newlyIndexed.contains(where: { d == $0 || d.hasPrefix($0 + "/") }) { continue }
+            let didChange = deep.contains(d)
+                ? LiveMonitor.reconcileTree(directory: d, in: &store, rules: rules, volID: 1, newlyIndexedDirs: &newlyIndexed)
+                : LiveMonitor.reconcile(directory: d, in: &store, rules: rules, volID: 1, newlyIndexedDirs: &newlyIndexed)
+            if didChange { changed = true }
         }
-        // Only re-search when the index ACTUALLY changed. The vast majority of
-        // FSEvents are file modifications (logs, caches, temp files) that add and
-        // remove nothing — firing a full-index re-search on each of those is what
-        // pegged the CPU progressively over a long session. No change → no work.
         guard changed else { return }
         cachedQueryKey = nil
         onLiveChange?()
@@ -183,6 +189,7 @@ actor IndexActor {
     // only the changes that happened after this point.
     func flush() {
         lastEventID = FSEventsGetCurrentEventId()
-        try? IndexCache.save(store, to: Self.cacheURL(), lastEventID: lastEventID)
+        try? IndexCache.save(store, to: Self.cacheURL(), lastEventID: lastEventID,
+                             rulesFingerprint: effectiveRules().fingerprint())
     }
 }

@@ -97,6 +97,9 @@ final class AppModel: ObservableObject {
             rules = newRules
             scanning = true
             await index.rescanAll()
+            // Persist the freshly-rebuilt index with the new rules' fingerprint, so the
+            // next launch sees a matching cache instead of rescanning again.
+            await index.flush()
             scanning = false
             total = await index.totalCount
             await runSearch()

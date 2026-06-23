@@ -2,48 +2,83 @@ import Foundation
 import CoreServices
 
 public final class LiveMonitor: @unchecked Sendable {
-    private var stream: FSEventStreamRef?
-    private let onDirsChanged: ([String]) -> Void
+    // One FSEvents delivery: the directory whose contents changed, plus whether the
+    // kernel coalesced so much it could only flag "rescan everything under here"
+    // (kFSEventStreamEventFlagMustScanSubDirs) instead of naming the exact level.
+    public struct FSChange: Sendable {
+        public let path: String
+        public let mustScanSubtree: Bool
+        public init(path: String, mustScanSubtree: Bool) {
+            self.path = path
+            self.mustScanSubtree = mustScanSubtree
+        }
+    }
 
-    public init(onDirsChanged: @escaping ([String]) -> Void) {
-        self.onDirsChanged = onDirsChanged
+    private var stream: FSEventStreamRef?
+    private let onChanged: ([FSChange]) -> Void
+
+    public init(onChanged: @escaping ([FSChange]) -> Void) {
+        self.onChanged = onChanged
     }
 
     // Re-scan one directory level and apply create/delete diffs against the store.
-    // Returns whether anything was actually added or removed: the live path uses
-    // this to avoid re-searching the whole index on the constant stream of FSEvents
-    // that change nothing structural (file content modifications) — the difference
-    // between a flat idle cost and CPU that climbs the longer the app is open.
+    // Returns whether anything was actually added or removed: the live path uses this
+    // to avoid re-searching the whole index on the constant stream of FSEvents that
+    // change nothing structural (file content modifications) — the difference between
+    // a flat idle cost and CPU that climbs the longer the app is open.
+    //
+    // `newlyIndexedDirs` collects the paths of brand-new directory subtrees indexed in
+    // this pass (via indexContents). The batch driver uses it to skip re-listing a
+    // subtree a sibling event in the same batch already built.
     @discardableResult
     public static func reconcile(directory: String, in store: inout FileStore,
-                                 rules: ExcludeRules, volID: UInt32) -> Bool {
+                                 rules: ExcludeRules, volID: UInt32,
+                                 newlyIndexedDirs: inout Set<String>) -> Bool {
         guard let dirID = store.idForDirPath(directory) else { return false }
         let existing = store.childIDs(of: dirID)
+
+        guard let dir = opendir(directory) else {
+            // The directory itself is gone — tombstone whatever children remain.
+            var changed = false
+            for id in existing { markSubtreeDeleted(id, in: &store); changed = true }
+            return changed
+        }
+        defer { closedir(dir) }
+
+        // First pass: names + project-marker detection, so live reconcile applies the
+        // SAME marker-scoped exclusion the full scan did (generic names like "build"
+        // skipped only inside a project dir).
+        var names: [String] = []
+        var inProjectDir = false
+        while let e = readdir(dir) {
+            let name = withUnsafePointer(to: e.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX)) { String(cString: $0) }
+            }
+            if name == "." || name == ".." { continue }
+            names.append(name)
+            if ExcludeRules.projectMarkers.contains(name) { inProjectDir = true }
+        }
+
         var onDisk = Set<String>()
         var changed = false
-        if let dir = opendir(directory) {
-            defer { closedir(dir) }
-            while let e = readdir(dir) {
-                let name = withUnsafePointer(to: e.pointee.d_name) {
-                    $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX)) { String(cString: $0) }
-                }
-                if name == "." || name == ".." { continue }
-                let full = (directory as NSString).appendingPathComponent(name)
-                if rules.shouldExclude(name: name, path: full, isHidden: name.hasPrefix(".")) { continue }
-                onDisk.insert(name)
-                if store.childID(named: name, under: dirID) == nil {
-                    var st = stat()
-                    guard lstat(full, &st) == 0 else { continue }
-                    let isDir = (st.st_mode & S_IFMT) == S_IFDIR
-                    let newID = store.append(name: name, parent: dirID, size: UInt64(st.st_size),
-                                             mtime: Int64(st.st_mtimespec.tv_sec), isDir: isDir, volID: volID)
-                    changed = true
-                    // A newly-created directory can hold a whole subtree that
-                    // FSEvents coalesced or reported out of parent-first order.
-                    // Index it now so nested/bulk creation is never dropped.
-                    if isDir {
-                        Scanner(rules: rules).indexContents(of: full, under: newID, into: &store, volID: volID)
-                    }
+        for name in names {
+            let full = (directory as NSString).appendingPathComponent(name)
+            if rules.shouldExclude(name: name, path: full, isHidden: name.hasPrefix("."), inProjectDir: inProjectDir) { continue }
+            onDisk.insert(name)
+            if store.childID(named: name, under: dirID) == nil {
+                var st = stat()
+                guard lstat(full, &st) == 0 else { continue }
+                let isDir = (st.st_mode & S_IFMT) == S_IFDIR
+                let newID = store.append(name: name, parent: dirID, size: UInt64(st.st_size),
+                                         mtime: Int64(st.st_mtimespec.tv_sec), isDir: isDir, volID: volID)
+                changed = true
+                // A newly-created directory can hold a whole subtree that FSEvents
+                // coalesced or reported out of parent-first order. Index it now so
+                // nested/bulk creation is never dropped, and record it so a sibling
+                // event for the same subtree this batch doesn't re-list it.
+                if isDir {
+                    Scanner(rules: rules).indexContents(of: full, under: newID, into: &store, volID: volID)
+                    newlyIndexedDirs.insert(full)
                 }
             }
         }
@@ -52,6 +87,38 @@ public final class LiveMonitor: @unchecked Sendable {
             // dir entry, or descendants linger as live ghost results.
             markSubtreeDeleted(id, in: &store)
             changed = true
+        }
+        return changed
+    }
+
+    // Convenience for callers that don't track cross-call subtree dedup (tests, one-off
+    // reconciles): reconcile a single directory level.
+    @discardableResult
+    public static func reconcile(directory: String, in store: inout FileStore,
+                                 rules: ExcludeRules, volID: UInt32) -> Bool {
+        var ignored = Set<String>()
+        return reconcile(directory: directory, in: &store, rules: rules, volID: volID, newlyIndexedDirs: &ignored)
+    }
+
+    // Recursively reconcile `directory` and every live subdirectory beneath it. Used
+    // for the FSEvents MustScanSubDirs flag (event-coalescing overflow): the kernel
+    // only says "something under here changed" without naming the leaf, so the whole
+    // known subtree must be re-diffed against disk or deep changes are missed until
+    // the next full rescan.
+    @discardableResult
+    public static func reconcileTree(directory: String, in store: inout FileStore,
+                                     rules: ExcludeRules, volID: UInt32,
+                                     newlyIndexedDirs: inout Set<String>) -> Bool {
+        var changed = reconcile(directory: directory, in: &store, rules: rules, volID: volID,
+                                newlyIndexedDirs: &newlyIndexedDirs)
+        guard let dirID = store.idForDirPath(directory) else { return changed }
+        // Snapshot of live child dirs after reconcile (includes any just appended).
+        for childID in store.childIDs(of: dirID) where store.isDir(of: childID) {
+            let childPath = store.path(of: childID)
+            // Subtrees reconcile just fully indexed are already current — skip.
+            if newlyIndexedDirs.contains(where: { childPath == $0 || childPath.hasPrefix($0 + "/") }) { continue }
+            if reconcileTree(directory: childPath, in: &store, rules: rules, volID: volID,
+                             newlyIndexedDirs: &newlyIndexedDirs) { changed = true }
         }
         return changed
     }
@@ -67,18 +134,24 @@ public final class LiveMonitor: @unchecked Sendable {
                       sinceWhen: FSEventStreamEventId = FSEventStreamEventId(kFSEventStreamEventIdSinceNow)) {
         let info = Unmanaged.passUnretained(self).toOpaque()
         var ctx = FSEventStreamContext(version: 0, info: info, retain: nil, release: nil, copyDescription: nil)
-        let cb: FSEventStreamCallback = { _, info, count, paths, _, _ in
+        let cb: FSEventStreamCallback = { _, info, count, paths, flags, _ in
             let mon = Unmanaged<LiveMonitor>.fromOpaque(info!).takeUnretainedValue()
             // Valid only because kFSEventStreamCreateFlagUseCFTypes is set below:
             // with that flag eventPaths is a CFArray<CFString>. Without it, paths
             // is a raw char** and this cast reads string bytes as a pointer →
             // SIGSEGV on the first delivered event.
             let cfArray = unsafeBitCast(paths, to: NSArray.self)
-            let changed = (0..<count).compactMap { cfArray[$0] as? String }
-            mon.onDirsChanged(changed)
+            let mustScan = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)
+            var changes: [FSChange] = []
+            changes.reserveCapacity(count)
+            for i in 0..<count {
+                guard let p = cfArray[i] as? String else { continue }
+                changes.append(FSChange(path: p, mustScanSubtree: (flags[i] & mustScan) != 0))
+            }
+            mon.onChanged(changes)
         }
-        // Directory-level events (NOT FileEvents). FSEvents coalesces and reports
-        // the DIRECTORY in which something changed rather than emitting one path per
+        // Directory-level events (NOT FileEvents). FSEvents coalesces and reports the
+        // DIRECTORY in which something changed rather than emitting one path per
         // changed file — far fewer callbacks under heavy churn, and exactly the
         // granularity reconcile wants (it re-lists a directory and diffs). FileEvents
         // flooded the actor with an event per modified file and handed reconcile file
