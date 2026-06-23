@@ -135,6 +135,8 @@ public enum ParallelScanner {
             var st = stat()
             guard lstat(full, &st) == 0 else { continue }
             let isDir = (st.st_mode & S_IFMT) == S_IFDIR
+            // File-name exclude patterns apply to files only.
+            if !isDir && rules.shouldExcludeFile(name: name) { continue }
             out.append(Entry(name: name, path: full, isDir: isDir,
                              size: UInt64(st.st_size), mtime: Int64(st.st_mtimespec.tv_sec)))
         }

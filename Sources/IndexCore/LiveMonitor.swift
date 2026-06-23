@@ -90,6 +90,9 @@ public final class LiveMonitor: @unchecked Sendable {
                 var st = stat()
                 guard lstat(full, &st) == 0 else { continue }
                 let isDir = (st.st_mode & S_IFMT) == S_IFDIR
+                // File-name exclude patterns apply to files only — a newly created
+                // file matching e.g. "*.tmp" must stay out of the live index too.
+                if !isDir && rules.shouldExcludeFile(name: name) { continue }
                 let newID = store.append(name: name, parent: dirID, size: UInt64(st.st_size),
                                          mtime: Int64(st.st_mtimespec.tv_sec), isDir: isDir, volID: volID)
                 changed = true

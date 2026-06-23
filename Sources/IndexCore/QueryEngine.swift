@@ -10,10 +10,30 @@ public struct QueryEngine: Sendable {
     }
 
     // Returns matching record ids in ascending id order. All terms must match (AND).
+    // The substring/glob scan is the hot path; "Match whole word" is layered on top as
+    // a cheap refinement pass over the already-narrowed result set, so the inner scan
+    // loops stay exactly as fast as before and pay nothing when the option is off.
+    public func search(_ query: Query, in store: FileStore) -> [UInt32] {
+        let ids = rawSearch(query, in: store)
+        guard query.wholeWord else { return ids }
+        return ids.filter { wholeWordMatch(query, id: $0, in: store) }
+    }
+
+    // Every plain (non-wildcard) term must occur as a whole word in the candidate's
+    // name (or full path, when matching paths). Wildcard terms already matched via the
+    // glob scan and aren't constrained further — "whole word" has no meaning for them.
+    private func wholeWordMatch(_ query: Query, id: UInt32, in store: FileStore) -> Bool {
+        let text = query.matchPath ? store.path(of: id) : store.name(of: id)
+        for term in query.terms where !(term.contains("*") || term.contains("?")) {
+            if !Glob.containsWholeWord(term, in: text, caseInsensitive: query.caseInsensitive) { return false }
+        }
+        return true
+    }
+
     // For large stores the scan is split across cores — a per-keystroke linear scan
     // of millions of records is the floor for substring search, so parallelizing it
     // is what keeps typing instant.
-    public func search(_ query: Query, in store: FileStore) -> [UInt32] {
+    private func rawSearch(_ query: Query, in store: FileStore) -> [UInt32] {
         let terms = query.terms
         let n = store.count
         // Empty query = every record. With no tombstones the id range IS the answer

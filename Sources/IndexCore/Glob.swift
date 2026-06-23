@@ -1,3 +1,5 @@
+import Foundation
+
 // Everything semantics: a term with no `*`/`?` is a substring match; a term that
 // contains a wildcard is anchored full-string glob matching.
 public enum Glob {
@@ -10,6 +12,33 @@ public enum Glob {
             return contains(haystack: ta, needle: pa)
         }
         return globMatch(pattern: pa, text: ta)
+    }
+
+    /// Whether `needle` occurs in `text` as a whole word — i.e. each occurrence is
+    /// bounded on both sides by a string edge or a non-alphanumeric scalar. Used by
+    /// the "Match whole word" search option; only meaningful for plain (non-wildcard)
+    /// terms. Empty needle matches everything (an empty term constrains nothing).
+    static func containsWholeWord(_ needle: String, in text: String, caseInsensitive: Bool) -> Bool {
+        let n = caseInsensitive ? needle.lowercased() : needle
+        let na = Array(n.unicodeScalars)
+        if na.isEmpty { return true }
+        let t = caseInsensitive ? text.lowercased() : text
+        let ta = Array(t.unicodeScalars)
+        if na.count > ta.count { return false }
+        let words = CharacterSet.alphanumerics
+        let last = ta.count - na.count
+        var i = 0
+        while i <= last {
+            var k = 0
+            while k < na.count && ta[i + k] == na[k] { k += 1 }
+            if k == na.count {
+                let beforeOK = i == 0 || !words.contains(ta[i - 1])
+                let afterOK = (i + na.count == ta.count) || !words.contains(ta[i + na.count])
+                if beforeOK && afterOK { return true }
+            }
+            i += 1
+        }
+        return false
     }
 
     private static func contains(haystack: [Unicode.Scalar], needle: [Unicode.Scalar]) -> Bool {

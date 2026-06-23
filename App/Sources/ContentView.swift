@@ -22,7 +22,7 @@ struct ContentView: View {
             SearchField(text: $model.query, matchPath: $model.matchPath, focused: $searchFocused) { model.queryChanged() }
             Divider()
             ResultsTable(rows: model.results,
-                         onSort: { k, a in model.sortKey = k; model.ascending = a; Task { await model.runSearch() } },
+                         onSort: { k, a in model.setSort(k, ascending: a) },
                          onSelect: { model.selectedID = $0?.id },
                          onActivate: { ResultActions.open($0) })
             Divider()

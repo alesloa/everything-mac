@@ -60,6 +60,9 @@ public struct Scanner: Sendable {
             // lstat reports S_IFLNK for symlinks, not S_IFDIR — so symlinked
             // directories won't be recursed into, preventing infinite loops.
             let isDir = (st.st_mode & S_IFMT) == S_IFDIR
+            // File-name exclude patterns apply to files only (directories are filtered
+            // by name/path in shouldExclude above).
+            if !isDir && rules.shouldExcludeFile(name: name) { continue }
             let mtime = Int64(st.st_mtimespec.tv_sec)
             let size = UInt64(st.st_size)
 

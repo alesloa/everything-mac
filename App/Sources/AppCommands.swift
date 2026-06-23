@@ -11,11 +11,19 @@ struct AppCommands: Commands {
 
     private var sortBinding: Binding<QueryEngine.SortKey> {
         Binding(get: { model.sortKey },
-                set: { model.sortKey = $0; Task { await model.runSearch() } })
+                set: { model.setSort($0, ascending: model.ascending) })
     }
     private var matchPathBinding: Binding<Bool> {
         Binding(get: { model.matchPath },
-                set: { model.matchPath = $0; Task { await model.runSearch() } })
+                set: { model.matchPath = $0; model.searchOptionsChanged() })
+    }
+    private var caseSensitiveBinding: Binding<Bool> {
+        Binding(get: { model.caseSensitive },
+                set: { model.caseSensitive = $0; model.searchOptionsChanged() })
+    }
+    private var wholeWordBinding: Binding<Bool> {
+        Binding(get: { model.wholeWord },
+                set: { model.wholeWord = $0; model.searchOptionsChanged() })
     }
 
     var body: some Commands {
@@ -71,11 +79,13 @@ struct AppCommands: Commands {
                 .pickerStyle(.inline)
             }
             Button(model.ascending ? "Sort Descending" : "Sort Ascending") {
-                model.ascending.toggle(); Task { await model.runSearch() }
+                model.setSort(model.sortKey, ascending: !model.ascending)
             }
             Divider()
             Toggle("Match Path", isOn: matchPathBinding)
                 .keyboardShortcut("p", modifiers: [.command, .shift])
+            Toggle("Match Case", isOn: caseSensitiveBinding)
+            Toggle("Match Whole Word", isOn: wholeWordBinding)
         }
 
         // HELP — point at the project instead of the empty default Help menu.

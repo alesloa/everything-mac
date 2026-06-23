@@ -10,6 +10,13 @@ final class AppModel: ObservableObject {
     @Published var sortKey: QueryEngine.SortKey = .name
     @Published var ascending = true
     @Published var matchPath = false
+    // Live search modifiers (Everything's Match Case / Match Whole Word). Persisted
+    // and threaded into every search; not part of ExcludeRules, so changing them
+    // re-runs the query instantly without re-indexing.
+    @Published var caseSensitive = false
+    @Published var wholeWord = false
+    // Max rows handed to the table — the old hardcoded 5000 cap, now user-tunable.
+    @Published var resultLimit = 5000
     @Published var rules: ExcludeRules = .defaults
     @Published var scanning = false
     @Published var selectedID: UInt32?
@@ -30,6 +37,7 @@ final class AppModel: ObservableObject {
     private var searchSeq = 0
 
     func bootstrap() {
+        loadPrefs()   // before the first runSearch so the initial query uses saved options
         Task {
             await index.startUp(
                 onLiveChange: { [weak self] in
@@ -71,6 +79,7 @@ final class AppModel: ObservableObject {
     }
 
     func queryChanged() {
+        savePrefs()   // also captures a Match-path toggle (shares this entry point)
         task?.cancel()
         task = Task {
             try? await Task.sleep(nanoseconds: 40_000_000) // debounce 40ms
@@ -79,10 +88,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // A live search option (case / whole-word / result limit) changed: persist it and
+    // re-run immediately (no debounce — these come from a deliberate click, not typing).
+    func searchOptionsChanged() { savePrefs(); Task { await runSearch() } }
+
+    // Persisted sort change from a column header or the View menu.
+    func setSort(_ key: QueryEngine.SortKey, ascending asc: Bool) {
+        sortKey = key; ascending = asc; savePrefs(); Task { await runSearch() }
+    }
+
     func runSearch() async {
         searchSeq &+= 1
         let mySeq = searchSeq
-        let r = await index.search(query, matchPath: matchPath, sort: sortKey, ascending: ascending)
+        let r = await index.search(query, matchPath: matchPath, caseInsensitive: !caseSensitive,
+                                   wholeWord: wholeWord, sort: sortKey, ascending: ascending, limit: resultLimit)
         IndexActor.dlog("runSearch seq=\(mySeq)/cur=\(searchSeq) sort=\(sortKey) asc=\(ascending) q='\(query)' -> \(r.count) rows first=\(r.first?.name ?? "-") published=\(mySeq == searchSeq && !Task.isCancelled)")
         // Only the most recently started search may publish — stops a slower
         // in-flight search (e.g. from a live-refresh tick) clobbering newer
@@ -116,6 +135,50 @@ final class AppModel: ObservableObject {
     }
 
     func focusSearch() { focusSearchSignal &+= 1 }
+
+    // MARK: - Search preference persistence (UserDefaults)
+
+    func loadPrefs() {
+        let d = UserDefaults.standard
+        matchPath = d.bool(forKey: "pref.matchPath")
+        caseSensitive = d.bool(forKey: "pref.caseSensitive")
+        wholeWord = d.bool(forKey: "pref.wholeWord")
+        let lim = d.integer(forKey: "pref.resultLimit")
+        resultLimit = lim > 0 ? lim : 5000
+        if let sk = d.string(forKey: "pref.sortKey") { sortKey = Self.sortKey(from: sk) }
+        if d.object(forKey: "pref.ascending") != nil { ascending = d.bool(forKey: "pref.ascending") }
+    }
+
+    func savePrefs() {
+        let d = UserDefaults.standard
+        d.set(matchPath, forKey: "pref.matchPath")
+        d.set(caseSensitive, forKey: "pref.caseSensitive")
+        d.set(wholeWord, forKey: "pref.wholeWord")
+        d.set(resultLimit, forKey: "pref.resultLimit")
+        d.set(Self.sortKeyName(sortKey), forKey: "pref.sortKey")
+        d.set(ascending, forKey: "pref.ascending")
+    }
+
+    // SortKey has no rawValue (the byte comparators don't need one); map it by hand
+    // for persistence.
+    static func sortKeyName(_ k: QueryEngine.SortKey) -> String {
+        switch k {
+        case .name:  return "name"
+        case .path:  return "path"
+        case .size:  return "size"
+        case .mtime: return "mtime"
+        case .kind:  return "kind"
+        }
+    }
+    static func sortKey(from s: String) -> QueryEngine.SortKey {
+        switch s {
+        case "path":  return .path
+        case "size":  return .size
+        case "mtime": return .mtime
+        case "kind":  return .kind
+        default:      return .name
+        }
+    }
 
     // Force a full whole-disk rescan (File ▸ Rebuild Index). Same shape as applyRules
     // but without changing the exclude rules — for when the index drifts or the user

@@ -16,16 +16,23 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
     // in search confuses users — the point of deleting is for it to be gone — so Trash
     // is skipped by default; toggle off to search inside it.
     public var excludeTrash: Bool
+    // File-name wildcard patterns (Everything's "Exclude files"). Matched against the
+    // FILE name only (never directories) during the scan, so e.g. "*.tmp" or "*.log"
+    // never enter the index. Empty by default — when empty the per-file check is a
+    // single isEmpty branch, so the scan hot path pays nothing.
+    public var excludeFilePatterns: [String]
 
     public init(names: Set<String> = [], pathPrefixes: [String] = [],
                 excludeHidden: Bool = false, excludeDevFolders: Bool = true,
-                excludeVCSFolders: Bool = true, excludeTrash: Bool = true) {
+                excludeVCSFolders: Bool = true, excludeTrash: Bool = true,
+                excludeFilePatterns: [String] = []) {
         self.names = names
         self.pathPrefixes = pathPrefixes
         self.excludeHidden = excludeHidden
         self.excludeDevFolders = excludeDevFolders
         self.excludeVCSFolders = excludeVCSFolders
         self.excludeTrash = excludeTrash
+        self.excludeFilePatterns = excludeFilePatterns
     }
 
     // Settings saved before excludeDevFolders/excludeVCSFolders existed lack those
@@ -34,7 +41,7 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
     // defaults). The three original fields are still hard-decoded — identical to the
     // synthesized conformance this replaces, so no pre-existing blob decodes worse.
     private enum CodingKeys: String, CodingKey {
-        case names, pathPrefixes, excludeHidden, excludeDevFolders, excludeVCSFolders, excludeTrash
+        case names, pathPrefixes, excludeHidden, excludeDevFolders, excludeVCSFolders, excludeTrash, excludeFilePatterns
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -44,6 +51,7 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
         excludeDevFolders = try c.decodeIfPresent(Bool.self, forKey: .excludeDevFolders) ?? true
         excludeVCSFolders = try c.decodeIfPresent(Bool.self, forKey: .excludeVCSFolders) ?? true
         excludeTrash = try c.decodeIfPresent(Bool.self, forKey: .excludeTrash) ?? true
+        excludeFilePatterns = try c.decodeIfPresent([String].self, forKey: .excludeFilePatterns) ?? []
     }
 
     // Unambiguous regenerable build output / dependency / tool-cache directories.
@@ -87,6 +95,12 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
     // Version-control metadata directories, gated by excludeVCSFolders.
     public static let vcsFolderNames: Set<String> = [".git", ".hg", ".svn"]
 
+    // Trash containers, gated by excludeTrash. ".Trash" is the per-user home trash;
+    // ".Trashes" is the per-volume trash at a volume root. Matched by name at any
+    // depth (same approach as VCS/dev names) — a stray user folder literally named
+    // ".Trash" is a non-issue in practice.
+    public static let trashFolderNames: Set<String> = [".Trash", ".Trashes"]
+
     public static let defaults = ExcludeRules(
         names: [],
         pathPrefixes: ["/private/var/folders", "/System/Volumes/Data/private/var/folders"],
@@ -103,11 +117,29 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
         if excludeHidden && isHidden { return true }
         if names.contains(name) { return true }
         if excludeVCSFolders && Self.vcsFolderNames.contains(name) { return true }
+        if excludeTrash && Self.trashFolderNames.contains(name) { return true }
         if excludeDevFolders {
             if Self.devFolderNames.contains(name) { return true }
             if inProjectDir && Self.markerScopedDevFolderNames.contains(name) { return true }
         }
         for prefix in pathPrefixes where path.hasPrefix(prefix) { return true }
+        return false
+    }
+
+    /// Whether a FILE (never a directory) should be skipped because its name matches
+    /// one of `excludeFilePatterns`. Patterns containing `*`/`?` are anchored glob
+    /// matches (e.g. "*.tmp"); patterns without wildcards are exact filename matches.
+    /// All matching is case-insensitive (APFS is case-insensitive by default).
+    /// Callers apply this only after `lstat` confirms the entry is not a directory.
+    public func shouldExcludeFile(name: String) -> Bool {
+        guard !excludeFilePatterns.isEmpty else { return false }
+        for pat in excludeFilePatterns where !pat.isEmpty {
+            if pat.contains("*") || pat.contains("?") {
+                if Glob.matches(pattern: pat, in: name, caseInsensitive: true) { return true }
+            } else if name.caseInsensitiveCompare(pat) == .orderedSame {
+                return true
+            }
+        }
         return false
     }
 
@@ -121,8 +153,10 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
         mix(excludeHidden ? "H1" : "H0")
         mix(excludeDevFolders ? "D1" : "D0")
         mix(excludeVCSFolders ? "V1" : "V0")
+        mix(excludeTrash ? "T1" : "T0")
         mix("N"); for n in names.sorted() { mix(n); mix("\u{1}") }
         mix("P"); for p in pathPrefixes { mix(p); mix("\u{1}") }
+        mix("F"); for p in excludeFilePatterns { mix(p); mix("\u{1}") }
         return hash
     }
 }

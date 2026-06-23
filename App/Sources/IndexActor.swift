@@ -51,15 +51,19 @@ actor IndexActor {
         return base.appendingPathComponent("index.idx")
     }
 
-    func search(_ text: String, matchPath: Bool, sort: QueryEngine.SortKey, ascending: Bool) -> [FileRecord] {
-        // Re-scan only when the query (not the sort) changed. engine.search already
-        // excludes tombstoned ids, so no separate isLive filter pass is needed.
-        let key = (matchPath ? "P\u{1}" : "N\u{1}") + text
+    func search(_ text: String, matchPath: Bool, caseInsensitive: Bool = true, wholeWord: Bool = false,
+                sort: QueryEngine.SortKey, ascending: Bool, limit: Int = 5000) -> [FileRecord] {
+        // Re-scan only when the query (not the sort) changed. The key folds in every
+        // flag that changes which ids match — matchPath, case sensitivity, whole-word —
+        // so flipping any of them invalidates the cache. engine.search already excludes
+        // tombstoned ids, so no separate isLive filter pass is needed.
+        let key = (matchPath ? "P" : "N") + (caseInsensitive ? "i" : "s") + (wholeWord ? "w" : "x") + "\u{1}" + text
         if key != cachedQueryKey {
-            cachedIDs = engine.search(Query(text: text, matchPath: matchPath), in: store)
+            cachedIDs = engine.search(Query(text: text, matchPath: matchPath,
+                                            caseInsensitive: caseInsensitive, wholeWord: wholeWord), in: store)
             cachedQueryKey = key
         }
-        let sorted = engine.sortedPrefix(cachedIDs, by: sort, ascending: ascending, limit: 5000, in: store)
+        let sorted = engine.sortedPrefix(cachedIDs, by: sort, ascending: ascending, limit: max(1, limit), in: store)
         return sorted.map { id in
             FileRecord(id: id, name: store.name(of: id), path: store.path(of: id),
                        parent: store.parent(of: id),
