@@ -127,25 +127,28 @@ public final class LiveMonitor: @unchecked Sendable {
         return reconcile(directory: directory, in: &store, rules: rules, volID: volID, newlyIndexedDirs: &ignored)
     }
 
-    // Recursively reconcile `directory` and every live subdirectory beneath it. Used
-    // for the FSEvents MustScanSubDirs flag (event-coalescing overflow): the kernel
-    // only says "something under here changed" without naming the leaf, so the whole
-    // known subtree must be re-diffed against disk or deep changes are missed until
-    // the next full rescan.
+    // Reconcile a single directory level. When the caller is descending a subtree — the
+    // FSEvents MustScanSubDirs overflow flag, where the kernel only says "something under
+    // here changed" without naming the leaf — append the live child directories to `stack`
+    // so the caller visits them next. The caller (IndexActor) drives the descent with an
+    // explicit stack and an `await` between levels, so a deep resync NEVER holds the actor
+    // in one uninterruptible call the way a recursive walk did: a queued search interleaves
+    // throughout. `newlyIndexedDirs` carries across the whole descent so a subtree just
+    // fully built (a new dir → indexContents) isn't re-listed.
     @discardableResult
-    public static func reconcileTree(directory: String, in store: inout FileStore,
-                                     rules: ExcludeRules, volID: UInt32,
-                                     newlyIndexedDirs: inout Set<String>) -> Bool {
-        var changed = reconcile(directory: directory, in: &store, rules: rules, volID: volID,
+    public static func reconcileLevel(directory: String, in store: inout FileStore,
+                                      rules: ExcludeRules, volID: UInt32, descend: Bool,
+                                      newlyIndexedDirs: inout Set<String>,
+                                      pushChildDirsTo stack: inout [String]) -> Bool {
+        let changed = reconcile(directory: directory, in: &store, rules: rules, volID: volID,
                                 newlyIndexedDirs: &newlyIndexedDirs)
-        guard let dirID = store.idForDirPath(directory) else { return changed }
+        guard descend, let dirID = store.idForDirPath(directory) else { return changed }
         // Snapshot of live child dirs after reconcile (includes any just appended).
         for childID in store.childIDs(of: dirID) where store.isDir(of: childID) {
             let childPath = store.path(of: childID)
-            // Subtrees reconcile just fully indexed are already current — skip.
+            // A subtree just fully indexed (new dir → indexContents) is already current.
             if newlyIndexedDirs.contains(where: { childPath == $0 || childPath.hasPrefix($0 + "/") }) { continue }
-            if reconcileTree(directory: childPath, in: &store, rules: rules, volID: volID,
-                             newlyIndexedDirs: &newlyIndexedDirs) { changed = true }
+            stack.append(childPath)
         }
         return changed
     }
