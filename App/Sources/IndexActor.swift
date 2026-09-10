@@ -46,6 +46,8 @@ actor IndexActor {
         return base.appendingPathComponent("index.idx")
     }
 
+    static func hasCache() -> Bool { FileManager.default.fileExists(atPath: cacheURL().path) }
+
     func search(_ text: String, matchPath: Bool, caseInsensitive: Bool = true, wholeWord: Bool = false,
                 sort: QueryEngine.SortKey, ascending: Bool, limit: Int = 5000) -> [FileRecord] {
         // Re-scan only when the query (not the sort) changed. The key folds in every
