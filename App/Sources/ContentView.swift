@@ -26,7 +26,8 @@ struct ContentView: View {
                          onSelect: { model.selectedID = $0?.id },
                          onActivate: { ResultActions.open($0) })
             Divider()
-            StatusBar(total: model.total, shown: model.results.count, scanning: model.scanning)
+            StatusBar(total: model.total, shown: model.results.count, scanning: model.scanning,
+                      shares: model.shares)
         }
         .background(.regularMaterial)
         .onAppear {

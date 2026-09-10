@@ -9,6 +9,7 @@ struct VolumesSettingsView: View {
     @ObservedObject var edit: SettingsModel
     var apply: () -> Void
     @State private var volumes: [VolumeInfo] = []
+    @State private var mountedShares: [MountTable.Mount] = []
 
     struct VolumeInfo: Identifiable {
         let id = UUID()
@@ -33,6 +34,25 @@ struct VolumesSettingsView: View {
                     .disabled(v.isBoot)
                 }
                 if volumes.isEmpty { Text("No local volumes found.").foregroundStyle(.secondary) }
+            }
+            Section {
+                ForEach(shareRows) { row in
+                    Toggle(isOn: shareBinding(row.share)) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(row.share.name)
+                            Text(row.detail).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if shareRows.isEmpty {
+                    Text("No network volumes mounted. Connect to a server in Finder to see it here.")
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Network volumes")
+            } footer: {
+                Text("A network volume is indexed while it's mounted and indexed again each time it reconnects. Its files stay searchable while it is offline.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Excluded folders") {
                 if userPaths.isEmpty {
@@ -63,7 +83,34 @@ struct VolumesSettingsView: View {
         }
         .formStyle(.grouped)
         .padding(20)
-        .onAppear { volumes = Self.localVolumes() }
+        .onAppear { volumes = Self.localVolumes(); mountedShares = MountTable.networkMounts() }
+    }
+
+    struct ShareRow: Identifiable {
+        let share: NetworkShare
+        let detail: String
+        var id: String { share.id }
+    }
+
+    // Mounted shares plus configured ones that are currently offline, so a share
+    // can still be switched off while its server is unreachable.
+    private var shareRows: [ShareRow] {
+        var rows = mountedShares.map { m in
+            ShareRow(share: NetworkShare(source: m.source, name: (m.path as NSString).lastPathComponent),
+                     detail: m.source)
+        }
+        for s in edit.networkShares where !rows.contains(where: { $0.share.source == s.source }) {
+            rows.append(ShareRow(share: s, detail: s.source + "  (not mounted)"))
+        }
+        return rows.sorted { $0.share.name.localizedStandardCompare($1.share.name) == .orderedAscending }
+    }
+
+    private func shareBinding(_ share: NetworkShare) -> Binding<Bool> {
+        Binding(get: { edit.networkShares.contains { $0.source == share.source } },
+                set: { include in
+                    edit.networkShares.removeAll { $0.source == share.source }
+                    if include { edit.networkShares.append(share) }
+                })
     }
 
     // A volume is "indexed" unless its mount path is in the excluded prefixes.

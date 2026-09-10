@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     @Published var resultLimit = 5000
     @Published var rules: ExcludeRules = .defaults
     @Published var scanning = false
+    @Published var shares: [NetworkShareStatus] = []
     @Published var selectedID: UInt32?
     // Bumped to ask the focused window to put the cursor in the search field (⌘F /
     // File ▸ Find). A counter, not a Bool, so repeated requests always fire onChange.
@@ -34,6 +35,7 @@ final class AppModel: ObservableObject {
     private var liveTask: Task<Void, Never>?
     private var flushTimer: Task<Void, Never>?
     private var cloudSweepTimer: Task<Void, Never>?
+    private var shareCheckTimer: Task<Void, Never>?
     private var searchSeq = 0
 
     func bootstrap() {
@@ -45,6 +47,9 @@ final class AppModel: ObservableObject {
                 },
                 onProgress: { [weak self] count in
                     Task { @MainActor in self?.onScanProgress(count) }
+                },
+                onShareStatus: { [weak self] status in
+                    Task { @MainActor in self?.shares = status }
                 }
             )
             scanning = false
@@ -53,6 +58,19 @@ final class AppModel: ObservableObject {
             await runSearch()
             startFlushTimer()
             startCloudSweep()
+            startShareCheck()
+        }
+    }
+
+    // FSEvents never fire for network shares, and a mount can come and go without
+    // touching /Volumes in a way we see, so poll the mount table as a safety net.
+    private func startShareCheck() {
+        shareCheckTimer = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30s
+                if Task.isCancelled { return }
+                await index.checkNetworkShares()
+            }
         }
     }
 
