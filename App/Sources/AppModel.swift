@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import IndexCore
 import Combine
 
@@ -60,7 +61,15 @@ final class AppModel: ObservableObject {
             startCloudSweep()
             startShareCheck()
         }
+        // A sleep is when a NAS connection is most likely lost: reconnect on wake.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.index.reconnectShares() }
+        }
     }
+
+    func reconnectShares() { Task { await index.reconnectShares() } }
 
     // FSEvents never fire for network shares, and a mount can come and go without
     // touching /Volumes in a way we see, so poll the mount table as a safety net.

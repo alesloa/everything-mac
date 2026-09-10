@@ -46,6 +46,7 @@ actor IndexActor {
     private var mountedShares: Set<String> = []
     private var scanningShares: [String: Int] = [:]
     private var shareCounts: [String: Int] = [:]
+    private var mountingShares: Set<String> = []
 
     init() {
         if let data = UserDefaults.standard.data(forKey: "excludeRules"),
@@ -143,6 +144,7 @@ actor IndexActor {
         mountedShares = []
         shareCounts = [:]
         checkNetworkShares()
+        reconnectShares()
     }
 
     // Launch path: load the cache if present (FSEvents replays any changes made
@@ -168,6 +170,7 @@ actor IndexActor {
             lastEventID = evid
             for share in rules.networkShares { shareCounts[share.source] = store.liveCount(volID: share.volID) }
             checkNetworkShares()
+            reconnectShares()
         } else {
             await rescanAll()
             lastEventID = FSEventsGetCurrentEventId()
@@ -193,6 +196,26 @@ actor IndexActor {
         }
         mountedShares = nowMounted
         publishShareStatus()
+    }
+
+    // Mount every configured share that is currently unreachable. Called on launch,
+    // on wake and from Settings — never on the periodic check, which would fight a
+    // user who just ejected the share on purpose.
+    func reconnectShares() {
+        let mounted = Set(MountTable.networkMounts().map(\.source))
+        for share in rules.networkShares where !mounted.contains(share.source) {
+            guard let url = share.url, !mountingShares.contains(share.source) else { continue }
+            mountingShares.insert(share.source)
+            Task {
+                let ok = await Task.detached(priority: .utility) { NetworkMounter.mount(url) }.value
+                await self.finishMount(share.source, mounted: ok)
+            }
+        }
+    }
+
+    private func finishMount(_ source: String, mounted: Bool) {
+        mountingShares.remove(source)
+        if mounted { checkNetworkShares() }
     }
 
     private func scanShare(_ share: NetworkShare, at mountPath: String) {

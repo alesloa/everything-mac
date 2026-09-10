@@ -6,12 +6,21 @@ import Foundation
 public struct NetworkShare: Sendable, Codable, Equatable, Hashable, Identifiable {
     public let source: String
     public let name: String
+    // URL the share can be mounted from again (smb://…), nil when the filesystem
+    // type has no known URL form. Saved so the app can reconnect without the user.
+    public let url: String?
 
     public var id: String { source }
 
-    public init(source: String, name: String) {
+    public init(source: String, name: String, url: String? = nil) {
         self.source = source
         self.name = name
+        self.url = url
+    }
+
+    public init(mount: MountTable.Mount) {
+        self.init(source: mount.source, name: (mount.path as NSString).lastPathComponent,
+                  url: mount.remountURL)
     }
 
     // Stable per-share volume id so a share's records can be found and replaced
@@ -29,6 +38,22 @@ public enum MountTable {
         public let source: String
         public let fsType: String
         public let isLocal: Bool
+
+        public init(path: String, source: String, fsType: String, isLocal: Bool) {
+            self.path = path; self.source = source; self.fsType = fsType; self.isLocal = isLocal
+        }
+
+        public var remountURL: String? {
+            switch fsType {
+            case "smbfs": return "smb:" + source
+            case "afpfs": return "afp:" + source
+            case "nfs":
+                guard let colon = source.firstIndex(of: ":") else { return nil }
+                return "nfs://" + source[..<colon] + source[source.index(after: colon)...]
+            case "webdav": return source
+            default: return nil
+            }
+        }
     }
 
     // MNT_NOWAIT reads the kernel's cached mount table and never touches the
@@ -63,5 +88,12 @@ public enum MountTable {
 
     public static func mountPath(forSource source: String) -> String? {
         networkMounts().first { $0.source == source }?.path
+    }
+
+    /// The network mount a path lives on, if any (longest mount point wins).
+    public static func networkMount(containing path: String) -> Mount? {
+        networkMounts()
+            .filter { path == $0.path || path.hasPrefix($0.path + "/") }
+            .max { $0.path.count < $1.path.count }
     }
 }

@@ -8,8 +8,10 @@ import IndexCore
 struct VolumesSettingsView: View {
     @ObservedObject var edit: SettingsModel
     var apply: () -> Void
+    @EnvironmentObject var model: AppModel
     @State private var volumes: [VolumeInfo] = []
     @State private var mountedShares: [MountTable.Mount] = []
+    @State private var shareNotice: String?
 
     struct VolumeInfo: Identifiable {
         let id = UUID()
@@ -36,22 +38,34 @@ struct VolumesSettingsView: View {
                 if volumes.isEmpty { Text("No local volumes found.").foregroundStyle(.secondary) }
             }
             Section {
-                ForEach(shareRows) { row in
-                    Toggle(isOn: shareBinding(row.share)) {
+                if edit.networkShares.isEmpty {
+                    Text("None").foregroundStyle(.secondary)
+                }
+                ForEach(edit.networkShares) { share in
+                    HStack {
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(row.share.name)
-                            Text(row.detail).font(.caption).foregroundStyle(.secondary)
+                            Text(share.name)
+                            Text(shareDetail(share)).font(.caption).foregroundStyle(.secondary)
                         }
+                        Spacer()
+                        if mountPath(of: share) == nil, share.url != nil {
+                            Button("Connect") { model.reconnectShares(); refreshMounts(after: 3) }
+                                .buttonStyle(.borderless)
+                        }
+                        Button(role: .destructive) { edit.networkShares.removeAll { $0.source == share.source } } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.borderless)
                     }
                 }
-                if shareRows.isEmpty {
-                    Text("No network volumes mounted. Connect to a server in Finder to see it here.")
-                        .foregroundStyle(.secondary)
+                Button("Add Network Volume…") { addNetworkVolume() }
+                if let shareNotice {
+                    Text(shareNotice).font(.caption).foregroundStyle(.orange)
                 }
             } header: {
                 Text("Network volumes")
             } footer: {
-                Text("A network volume is indexed while it's mounted and indexed again each time it reconnects. Its files stay searchable while it is offline.")
+                Text("A network volume is indexed while it's mounted and indexed again each time it reconnects. Its files stay searchable while it is offline, and the app reconnects it at launch and after sleep.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Excluded folders") {
@@ -86,31 +100,42 @@ struct VolumesSettingsView: View {
         .onAppear { volumes = Self.localVolumes(); mountedShares = MountTable.networkMounts() }
     }
 
-    struct ShareRow: Identifiable {
-        let share: NetworkShare
-        let detail: String
-        var id: String { share.id }
+    private func mountPath(of share: NetworkShare) -> String? {
+        mountedShares.first { $0.source == share.source }?.path
     }
 
-    // Mounted shares plus configured ones that are currently offline, so a share
-    // can still be switched off while its server is unreachable.
-    private var shareRows: [ShareRow] {
-        var rows = mountedShares.map { m in
-            ShareRow(share: NetworkShare(source: m.source, name: (m.path as NSString).lastPathComponent),
-                     detail: m.source)
-        }
-        for s in edit.networkShares where !rows.contains(where: { $0.share.source == s.source }) {
-            rows.append(ShareRow(share: s, detail: s.source + "  (not mounted)"))
-        }
-        return rows.sorted { $0.share.name.localizedStandardCompare($1.share.name) == .orderedAscending }
+    private func shareDetail(_ share: NetworkShare) -> String {
+        if let p = mountPath(of: share) { return share.source + "  ·  " + p }
+        return share.source + "  ·  not mounted"
     }
 
-    private func shareBinding(_ share: NetworkShare) -> Binding<Bool> {
-        Binding(get: { edit.networkShares.contains { $0.source == share.source } },
-                set: { include in
-                    edit.networkShares.removeAll { $0.source == share.source }
-                    if include { edit.networkShares.append(share) }
-                })
+    private func refreshMounts(after seconds: Double = 0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { mountedShares = MountTable.networkMounts() }
+    }
+
+    // Picking a share (or any folder on it) in the panel mounts it, exactly like
+    // Finder. The whole share is indexed: a folder inside it just identifies it.
+    private func addNetworkVolume() {
+        let panel = NSOpenPanel()
+        panel.title = "Add Network Volume"
+        panel.message = "Choose a network volume, or any folder on it. The whole volume will be indexed."
+        panel.prompt = "Add"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: "/Volumes")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let mount = MountTable.networkMount(containing: url.path) else {
+            shareNotice = "\(url.lastPathComponent) is on a local volume, which is indexed already."
+            return
+        }
+        let share = NetworkShare(mount: mount)
+        if !edit.networkShares.contains(where: { $0.source == share.source }) {
+            edit.networkShares.append(share)
+        }
+        shareNotice = url.path == mount.path ? nil
+            : "Added the whole volume \"\(share.name)\" that contains \(url.lastPathComponent)."
+        refreshMounts()
     }
 
     // A volume is "indexed" unless its mount path is in the excluded prefixes.
