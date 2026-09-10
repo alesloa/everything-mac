@@ -93,6 +93,9 @@ public final class LiveMonitor: @unchecked Sendable {
                 var st = stat()
                 guard lstat(full, &st) == 0 else { continue }
                 let isDir = (st.st_mode & S_IFMT) == S_IFDIR
+                // A network share that appeared after launch is managed by its own
+                // scan; crawling it here would block the actor on remote I/O.
+                if isDir && MountTable.nonLocalMounts().contains(where: { $0.path == full }) { continue }
                 // File-name exclude patterns apply to files only — a newly created
                 // file matching e.g. "*.tmp" must stay out of the live index too.
                 if !isDir && rules.shouldExcludeFile(name: name) { continue }

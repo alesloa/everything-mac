@@ -331,7 +331,10 @@ actor IndexActor {
 
     func enqueueChanges(_ changes: [LiveMonitor.FSChange]) {
         for c in changes {
-            let p = LiveMonitor.canonicalEventPath(c.path)
+            // FSEvents delivers directories with a trailing slash; the index and the
+            // volume-root checks work with the bare path.
+            let raw = c.path.count > 1 && c.path.hasSuffix("/") ? String(c.path.dropLast()) : c.path
+            let p = LiveMonitor.canonicalEventPath(raw)
             pendingDirs.insert(p)
             if c.mustScanSubtree { pendingDeep.insert(p) }
         }
