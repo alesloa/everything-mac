@@ -16,6 +16,7 @@ Tests/*
 Tests/IndexCoreTests/*
 !Tests/IndexCoreTests/NetworkShareTests.swift
 !Tests/IndexCoreTests/FuzzySearchTests.swift
+!Tests/IndexCoreTests/UniqueNameIndexTests.swift
 !Tests/AppIntegrationTests/
 
 # macOS, logs, crash dumps

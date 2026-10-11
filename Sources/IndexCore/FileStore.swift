@@ -1,5 +1,13 @@
 import Foundation
 
+// Compatibility view shared with the mapped-base/append-overlay storage layer.
+struct FileNameArena {
+    let buffer: UnsafeBufferPointer<UInt8>
+    func bytes(in range: Range<Int>) -> UnsafeBufferPointer<UInt8> {
+        UnsafeBufferPointer(start: buffer.baseAddress?.advanced(by: range.lowerBound), count: range.count)
+    }
+}
+
 // Flat in-memory index. Names live in one contiguous UTF-8 arena; metadata in
 // parallel arrays indexed by record id. Full path is reconstructed by walking
 // `parents` to the root.
@@ -90,8 +98,11 @@ public struct FileStore: Sendable {
         return start..<(start + Int(nameLen[Int(id)]))
     }
 
-    func withNameArena<R>(_ body: (UnsafeBufferPointer<UInt8>) -> R) -> R {
-        nameBytes.withUnsafeBufferPointer(body)
+    var baseCount: Int { 0 }
+    func cachedBaseValue<Value: Sendable>(key: String, build: () -> Value?) -> Value? { nil }
+
+    func withNameArena<R>(_ body: (FileNameArena) -> R) -> R {
+        nameBytes.withUnsafeBufferPointer { body(FileNameArena(buffer: $0)) }
     }
 
     /// ASCII-case-insensitive lexicographic compare of two records' names by their

@@ -52,7 +52,23 @@ public final class SearchIndex: @unchecked Sendable {
         let store: FileStore
         private let cacheLock = NSLock()
         private var cached: (Query, Matches)?
-        init(store: FileStore) { self.store = store }
+        private var nameIndex: UniqueNameIndex?
+        private let namePreparation: UniqueNameIndex.Preparation
+        init(store: FileStore) {
+            self.store = store
+            namePreparation = UniqueNameIndex.Preparation(store: store)
+        }
+
+        private func names() -> UniqueNameIndex? {
+            if let ready = cacheLock.withLock({ nameIndex }) { return ready }
+            // Ready-only lookup: cold preparation never lands on a typed query.
+            guard let built = namePreparation.ready() else { return nil }
+            return cacheLock.withLock {
+                if let ready = nameIndex { return ready }
+                nameIndex = built
+                return built
+            }
+        }
 
         func search(_ query: Query, sort: QueryEngine.SortKey, ascending: Bool, limit: Int,
                     isCancelled: @escaping @Sendable () -> Bool) -> [FileRecord] {
@@ -63,9 +79,11 @@ public final class SearchIndex: @unchecked Sendable {
             if let previous, previous.0 == query {
                 matches = previous.1
             } else {
+                let names = query.matchPath || query.terms.isEmpty ? nil : names()
+                guard !isCancelled() else { return [] }
                 matches = query.hasFuzzyTerms
-                    ? .fuzzy(engine.matches(query, in: store, isCancelled: isCancelled))
-                    : .exact(engine.search(query, in: store, isCancelled: isCancelled))
+                    ? .fuzzy(engine.matches(query, in: store, nameIndex: names, isCancelled: isCancelled))
+                    : .exact(engine.search(query, in: store, nameIndex: names, isCancelled: isCancelled))
                 guard !isCancelled() else { return [] }
                 let old = cacheLock.withLock {
                     let old = cached
