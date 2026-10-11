@@ -234,7 +234,10 @@ public struct FileStore: Sendable {
     }
 
     public func childID(named target: String, under parent: UInt32) -> UInt32? {
-        childrenByParent[parent]?.first { isLive($0) && name(of: $0) == target }
+        guard let children = childrenByParent[parent] else { return nil }
+        return withNameArena { arena in
+            children.first { isLive($0) && arena.bytes(in: nameRange(of: $0)).elementsEqual(target.utf8) }
+        }
     }
 
     // Resolve an absolute directory path to its id by walking the child index from
@@ -245,13 +248,13 @@ public struct FileStore: Sendable {
     public func idForDirPath(_ path: String) -> UInt32? {
         guard rootID != Self.noParent, isLive(rootID), isDir(of: rootID) else { return nil }
         let rootName = name(of: rootID)
-        if path == rootName { return rootID }
-        guard rootName == "/" ? path.hasPrefix("/") : path.hasPrefix(rootName + "/") else { return nil }
-        var rest = path.dropFirst(rootName.count)
-        if rest.hasPrefix("/") { rest = rest.dropFirst() }   // unless rootName == "/"
+        if path.utf8.elementsEqual(rootName.utf8) { return rootID }
+        let prefix = rootName == "/" ? "/" : rootName + "/"
+        guard path.utf8.starts(with: prefix.utf8) else { return nil }
+        let rest = path.utf8.dropFirst(prefix.utf8.count)
         var cur = rootID
-        for comp in rest.split(separator: "/", omittingEmptySubsequences: true) {
-            guard let next = childID(named: String(comp), under: cur), isDir(of: next) else { return nil }
+        for comp in rest.split(separator: UInt8(47), omittingEmptySubsequences: true) {
+            guard let next = childID(named: String(decoding: comp, as: UTF8.self), under: cur), isDir(of: next) else { return nil }
             cur = next
         }
         return cur

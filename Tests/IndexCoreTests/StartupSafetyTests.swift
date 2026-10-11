@@ -431,3 +431,67 @@ private final class StorageScanBudget: @unchecked Sendable {
     #expect(store.childIDs(of: child).count == 1)
     #expect(!store.subtreeIsIncomplete(child) && !store.subtreeIsIncomplete(store.rootID))
 }
+
+@Test func storageReviewUnicodeDirectoryLookupPreservesExactUTF8Identity() {
+    let composed = "\u{e9}", decomposed = "e\u{301}"
+    #expect(composed == decomposed && !composed.utf8.elementsEqual(decomposed.utf8))
+    var store = FileStore()
+    let root = store.append(name: "/", parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
+    let first = store.append(name: composed, parent: root, size: 0, mtime: 0, isDir: true, volID: 1)
+    let second = store.append(name: decomposed, parent: root, size: 0, mtime: 0, isDir: true, volID: 1)
+    #expect(store.childID(named: composed, under: root) == first)
+    #expect(store.childID(named: decomposed, under: root) == second)
+    #expect(store.idForDirPath("/" + composed) == first)
+    #expect(store.idForDirPath("/" + decomposed) == second)
+    var scoped = FileStore()
+    scoped.append(name: "/scoped/" + composed, parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
+    #expect(scoped.idForDirPath("/scoped/" + decomposed) == nil)
+    #expect(scoped.idForDirPath("/scoped/" + decomposed + "/") == nil)
+}
+
+@Test func storageReviewUnicodeLiveDiffRemovesOnlyMissingExactName() throws {
+    let directory = try safetyDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory.appendingPathComponent("\u{e9}"), withIntermediateDirectories: true)
+    var observed = FileStore()
+    try Scanner(rules: .defaults).scan(rootPath: directory.path, into: &observed, volID: 1)
+    let actual = observed.name(of: try #require(observed.childIDs(of: observed.rootID).first))
+    let missing = actual.utf8.elementsEqual("\u{e9}".utf8) ? "e\u{301}" : "\u{e9}"
+    #expect(actual == missing && !actual.utf8.elementsEqual(missing.utf8))
+    var store = FileStore()
+    let root = store.append(name: directory.path, parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
+    let present = store.append(name: actual, parent: root, size: 0, mtime: 0, isDir: true, volID: 1)
+    let absent = store.append(name: missing, parent: root, size: 0, mtime: 0, isDir: false, volID: 1)
+    #expect(LiveMonitor.reconcile(directory: directory.path, in: &store, rules: .defaults, volID: 1))
+    #expect(store.isLive(present) && !store.isLive(absent))
+}
+
+@Test func storageReviewUnicodeSubtreeDedupDoesNotSkipDistinctBytePath() {
+    var store = FileStore()
+    let root = store.append(name: "/unicode-synthetic-fixture", parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 99)
+    let composed = store.append(name: "\u{e9}", parent: root, size: 0, mtime: 0, isDir: true, volID: 1)
+    let decomposed = store.append(name: "e\u{301}", parent: root, size: 0, mtime: 0, isDir: true, volID: 1)
+    var indexed: Set<String> = [store.path(of: composed)], pending: [String] = []
+    // Root volume differs, so reconciliation exits before any filesystem access.
+    LiveMonitor.reconcileLevel(directory: store.path(of: root), in: &store, rules: .defaults, volID: 1,
+                               descend: true, newlyIndexedDirs: &indexed, pushChildDirsTo: &pending)
+    #expect(pending.count == 1)
+    #expect(pending.first?.utf8.elementsEqual(store.path(of: decomposed).utf8) == true)
+}
+
+@Test func storageReviewUnicodeForeignNameDoesNotHideDistinctLocalEntry() throws {
+    let directory = try safetyDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory.appendingPathComponent("\u{e9}"), withIntermediateDirectories: true)
+    var observed = FileStore()
+    try Scanner(rules: .defaults).scan(rootPath: directory.path, into: &observed, volID: 1)
+    let actual = observed.name(of: try #require(observed.childIDs(of: observed.rootID).first))
+    let foreignName = actual.utf8.elementsEqual("\u{e9}".utf8) ? "e\u{301}" : "\u{e9}"
+    var store = FileStore()
+    let root = store.append(name: directory.path, parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
+    let foreign = store.append(name: foreignName, parent: root, size: 0, mtime: 0, isDir: true, volID: 99)
+    #expect(LiveMonitor.reconcile(directory: directory.path, in: &store, rules: .defaults, volID: 1))
+    let local = try #require(store.childID(named: actual, under: root))
+    #expect(store.volID(of: local) == 1 && store.isLive(foreign))
+    #expect(store.childIDs(of: root).count == 2)
+}

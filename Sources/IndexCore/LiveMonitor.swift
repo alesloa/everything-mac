@@ -1,6 +1,16 @@
 import Foundation
 import CoreServices
 
+// Network filesystems can expose canonically equivalent but byte-distinct names.
+// String hashing may collide for those names; raw equality keeps their keys distinct
+// without allocating a UTF-8 array for every directory entry.
+private struct RawFileName: Hashable {
+    let value: String
+    init(_ value: String) { self.value = value }
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.value.utf8.elementsEqual(rhs.value.utf8) }
+    func hash(into hasher: inout Hasher) { hasher.combine(value) }
+}
+
 public final class LiveMonitor: @unchecked Sendable {
     // One FSEvents delivery: the directory whose contents changed, plus whether the
     // kernel coalesced so much it could only flag "rescan everything under here"
@@ -118,25 +128,26 @@ public final class LiveMonitor: @unchecked Sendable {
         }
 
         // Keep local entries by name; grafted shares are never stat'ed here.
-        var existingByName: [String: [UInt32]] = [:]
-        for id in existing { existingByName[store.name(of: id), default: []].append(id) }
-        let foreignNames = Set(allChildren.filter { store.volID(of: $0) != volID }.map { store.name(of: $0) })
-        var onDisk = Set<String>()
+        var existingByName: [RawFileName: [UInt32]] = [:]
+        for id in existing { existingByName[RawFileName(store.name(of: id)), default: []].append(id) }
+        let foreignNames = Set(allChildren.filter { store.volID(of: $0) != volID }.map { RawFileName(store.name(of: $0)) })
+        var onDisk = Set<RawFileName>()
         var changed = false, completed = true
-        let nonLocalMounts = Set(MountTable.nonLocalMounts().map(\.path))
+        let nonLocalMounts = Set(MountTable.nonLocalMounts().map { RawFileName($0.path) })
         for name in names {
+            let key = RawFileName(name)
             let full = (directory as NSString).appendingPathComponent(name)
             if rules.shouldExclude(name: name, path: full, isHidden: name.hasPrefix("."), inProjectDir: inProjectDir) { continue }
             // Check before lstat: even stat'ing a stalled share can block.
-            if foreignNames.contains(name) || nonLocalMounts.contains(full) { onDisk.insert(name); continue }
+            if foreignNames.contains(key) || nonLocalMounts.contains(RawFileName(full)) { onDisk.insert(key); continue }
             var st = stat()
             guard fstatat(dirfd(dir), name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_size >= 0 else {
-                onDisk.insert(name); completed = false; continue
+                onDisk.insert(key); completed = false; continue
             }
             let isDir = (st.st_mode & S_IFMT) == S_IFDIR
             if !isDir && rules.shouldExcludeFile(name: name) { continue }
-            onDisk.insert(name)
-            if let prior = existingByName[name] {
+            onDisk.insert(key)
+            if let prior = existingByName[key] {
                 if prior.allSatisfy({ store.isDir(of: $0) == isDir }) {
                     if isDir, prior.contains(where: { store.subtreeIsIncomplete($0) }) {
                         // Retry only known failed subtrees. Diffing existing children
@@ -162,7 +173,7 @@ public final class LiveMonitor: @unchecked Sendable {
                 } else { completed = false }
             }
         }
-        for id in existing where !onDisk.contains(store.name(of: id)) {
+        for id in existing where !onDisk.contains(RawFileName(store.name(of: id))) {
             // Deleting a directory must tombstone its whole subtree, not just the
             // dir entry, or descendants linger as live ghost results.
             store.markSubtreeDeleted(id)
@@ -204,7 +215,9 @@ public final class LiveMonitor: @unchecked Sendable {
         for childID in store.childIDs(of: dirID) where store.isDir(of: childID) && store.volID(of: childID) == volID {
             let childPath = store.path(of: childID)
             // A subtree just fully indexed (new dir → indexContents) is already current.
-            if newlyIndexedDirs.contains(where: { childPath == $0 || childPath.hasPrefix($0 + "/") }) { continue }
+            if newlyIndexedDirs.contains(where: {
+                childPath.utf8.elementsEqual($0.utf8) || childPath.utf8.starts(with: ($0 + "/").utf8)
+            }) { continue }
             stack.append(childPath)
         }
         return changed
