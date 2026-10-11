@@ -2,6 +2,10 @@ import AppKit
 import IndexCore
 
 @main struct WindowIsolation {
+    @MainActor private static func check(_ condition: @autoclosure () -> Bool,
+                                        _ message: String = "Window state assertion", line: UInt = #line) {
+        guard condition() else { print("FAIL at line \(line): \(message)"); exit(1) }
+    }
     @MainActor static func main() async throws {
         _ = NSApplication.shared
         let suite = "window-isolation-\(UUID().uuidString)"
@@ -22,7 +26,7 @@ import IndexCore
                 return store
             })
         let completed = await index.rescanAll()
-        precondition(completed)
+        check(completed)
         let background = AppModel(index: index, preferences: preferences)
         let first = AppModel(index: index, preferences: preferences,
             workspace: SearchWorkspaceController(library: background.workspace.library))
@@ -34,31 +38,31 @@ import IndexCore
         first.fuzzy = false; second.fuzzy = false
         first.query = "first"; second.query = "second"
         await first.runSearch(); await second.runSearch()
-        precondition(first.results.map(\.name) == ["first.txt"])
-        precondition(second.results.map(\.name) == ["second.txt"])
+        check(first.results.map(\.name) == ["first.txt"])
+        check(second.results.map(\.name) == ["second.txt"])
         first.caseSensitive = true; first.sortKey = .size
-        precondition(second.query == "second" && !second.caseSensitive && second.sortKey != .size,
+        check(second.query == "second" && !second.caseSensitive && second.sortKey != .size,
                      "A window changed another window's search options")
 
         background.rules.names = ["changed-rules"]
         background.shares = []
         background.total = index.totalCount
         background.scanning = true
-        precondition(first.scanning && second.scanning)
-        precondition(first.rules.names == ["changed-rules"] && second.total == 3)
+        check(first.scanning && second.scanning)
+        check(first.rules.names == ["changed-rules"] && second.total == 3)
         background.scanning = false
         background.indexRevision &+= 1
         try await Task.sleep(for: .milliseconds(100))
-        precondition(first.results.map(\.name) == ["first.txt"] && second.results.map(\.name) == ["second.txt"])
+        check(first.results.map(\.name) == ["first.txt"] && second.results.map(\.name) == ["second.txt"])
         first.query = "first"
         let saved = try first.saveCurrentSearch(name: "First files", macroName: "firstfiles")
-        precondition(second.workspace.library.archive.savedSearches.contains { $0.id == saved.id })
+        check(second.workspace.library.archive.savedSearches.contains { $0.id == saved.id })
         first.query = "macro:firstfiles"
         await first.runSearch()
-        precondition(first.searchError == nil && first.results.map(\.name) == ["first.txt"])
+        check(first.searchError == nil && first.results.map(\.name) == ["first.txt"])
         first.query = "macro:missing"
         await first.runSearch()
-        precondition(first.searchError != nil && first.results.isEmpty, "Invalid macros widened the query")
+        check(first.searchError != nil && first.results.isEmpty, "Invalid macros widened the query")
         first.query = "first"; first.searchError = nil
         first.workspaceStateChanged()
         let originalTab = first.workspace.window.selectedTabID
@@ -66,12 +70,18 @@ import IndexCore
         first.query = "second"; first.workspaceStateChanged()
         first.selectSearchTab(originalTab)
         await first.runSearch()
-        precondition(first.query == "first" && first.results.map(\.name) == ["first.txt"])
-        precondition(second.query == "second" && second.workspace.window.tabs.count == 1)
+        check(first.query == "first", "Tab restored query \(first.query)")
+        // Tab selection enqueues a search; await its accepted publication rather
+        // than the separately awaited worker which may have been superseded.
+        for _ in 0..<100 where first.results.map(\.name) != ["first.txt"] {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        check(first.results.map(\.name) == ["first.txt"], "Restored results \(first.results.map(\.name))")
+        check(second.query == "second" && second.workspace.window.tabs.count == 1)
         first.persistWorkspace(); second.persistWorkspace()
         let restored = WorkspaceLibrary(preferences: preferences)
-        precondition(restored.archive.windows.count == 2)
-        precondition(restored.archive.windows.contains { $0.tabs.count == 2 })
+        check(restored.archive.windows.count == 2)
+        check(restored.archive.windows.contains { $0.tabs.count == 2 })
         print("PASS: windows keep independent searches and receive shared index updates")
     }
 }

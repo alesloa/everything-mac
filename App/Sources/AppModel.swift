@@ -8,8 +8,11 @@ final class AppModel: ObservableObject {
     @Published var query = ""
     @Published var results: [FileRecord] = [] {
         didSet {
+            let recordsByID = Dictionary(results.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             selectedRecords = selectedRecords.compactMap { selected in
-                results.first { $0.id == selected.id && $0.path.utf8.elementsEqual(selected.path.utf8) }
+                guard let current = recordsByID[selected.id],
+                      current.path.utf8.elementsEqual(selected.path.utf8) else { return nil }
+                return current
             }
             if selectedID != nil && selected == nil {
                 selectedID = selectedRecords.first?.id
@@ -84,6 +87,15 @@ final class AppModel: ObservableObject {
     private var activeScanID: UUID?
     private weak var backgroundOwner: AppModel?
     private var backgroundSubscriptions: Set<AnyCancellable> = []
+    private var loadedCatalogStore: CatalogStore?
+
+    var catalogStore: CatalogStore {
+        if let backgroundOwner { return backgroundOwner.catalogStore }
+        if let loadedCatalogStore { return loadedCatalogStore }
+        let store = CatalogStore(nativeIndex: index.searchIndex)
+        loadedCatalogStore = store
+        return store
+    }
 
     init(index: IndexActor = IndexActor(), preferences: UserDefaults = .standard,
          workspace: SearchWorkspaceController? = nil) {
@@ -189,7 +201,7 @@ final class AppModel: ObservableObject {
                 scanning = false
                 total = index.totalCount
                 rules = currentRules
-                indexRevision &+= 1
+                indexDidChange()
                 await runSearch()
             }
             startFlushTimer()
@@ -303,9 +315,14 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 200_000_000)
             if Task.isCancelled { return }
             if !scanning { total = index.totalCount }
-            indexRevision &+= 1
+            indexDidChange()
             await runSearch()
         }
+    }
+
+    private func indexDidChange() {
+        indexRevision &+= 1
+        loadedCatalogStore?.refreshNative()
     }
 
     private func startFlushTimer() {
@@ -323,10 +340,17 @@ final class AppModel: ObservableObject {
     func focusSearch() { focusSearchSignal &+= 1 }
 
     func selectRecords(_ records: [FileRecord]) {
+        let recordsByID = Dictionary(results.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         selectedRecords = records.filter { selected in
-            results.contains { $0.id == selected.id && $0.path.utf8.elementsEqual(selected.path.utf8) }
+            recordsByID[selected.id]?.path.utf8.elementsEqual(selected.path.utf8) == true
         }
         selectedID = selectedRecords.first?.id
+        updateQuickLookSelection()
+    }
+
+    func updateQuickLookSelection() {
+        guard let window = NSApp.mainWindow ?? NSApp.keyWindow,
+              SearchWindowRegistry.shared.model(for: window) === self else { return }
         QuickLookController.shared.updateSelection(actionRecords, allowsNetwork: previewAllowsNetwork)
     }
 
@@ -337,6 +361,14 @@ final class AppModel: ObservableObject {
               matchPrefix: matchPrefix, matchSuffix: matchSuffix,
               ignorePunctuation: ignorePunctuation, ignoreWhitespace: ignoreWhitespace)
         return searchFilter.applying(to: base)
+    }
+
+    var featureQueryResult: Result<Query, Error> {
+        do {
+            let resolved = try resolvedWorkspaceQuery()
+            if let error = resolved.validationError { throw error }
+            return .success(resolved)
+        } catch { return .failure(error) }
     }
 
     // MARK: - Search preference persistence (UserDefaults)
@@ -449,7 +481,7 @@ final class AppModel: ObservableObject {
             rebuildTask = nil
             scanning = false
             total = index.totalCount
-            indexRevision &+= 1
+            indexDidChange()
             await runSearch()
         }
     }

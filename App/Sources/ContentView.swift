@@ -81,9 +81,7 @@ struct ContentView: View {
         .background(.regularMaterial)
         .onAppear { searchFocused = true }
         .onChange(of: model.focusSearchSignal) { searchFocused = true }
-        .onChange(of: model.actionRecords) { _, records in
-            QuickLookController.shared.updateSelection(records, allowsNetwork: model.previewAllowsNetwork)
-        }
+        .onChange(of: model.actionRecords) { model.updateQuickLookSelection() }
         .sheet(item: $model.activePanel) { panel in
             featurePanel(panel).environmentObject(model)
         }
@@ -101,9 +99,30 @@ struct ContentView: View {
                 }, onCancel: { model.activePanel = nil })
             case .bookmarks: SavedSearchesView()
             case .history: SearchHistoryView()
+            case .catalogs:
+                switch model.featureQueryResult {
+                case .success(let query):
+                    CatalogBrowserView(store: model.catalogStore).onAppear {
+                        model.catalogStore.configure(query: query, resultLimit: model.resultLimit)
+                    }
+                case .failure(let error): featureError(error)
+                }
+            case .export:
+                switch model.featureQueryResult {
+                case .success(let query):
+                    NativeResultsExportView(index: model.index.searchIndex, query: query,
+                        selected: model.actionRecords, shown: model.results,
+                        sort: model.sortKey, ascending: model.ascending)
+                case .failure(let error): featureError(error)
+                }
             default: EmptyView()
             }
         }
+    }
+
+    private func featureError(_ error: Error) -> some View {
+        // Source: saved-query expansion or Query.validationError for this window.
+        Text(error.localizedDescription).foregroundStyle(.red).textSelection(.enabled).padding(20)
     }
 
     private var advancedInitialQuery: String {
