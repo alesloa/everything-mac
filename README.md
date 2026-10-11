@@ -58,6 +58,15 @@ swift test -c release
 ./scripts/test-search-isolation.sh
 ```
 
+The regressions in [`StartupSafetyTests.swift`](Tests/IndexCoreTests/StartupSafetyTests.swift)
+and [`TableSafety.swift`](Tests/AppIntegrationTests/TableSafety.swift) exercise watcher
+replacement/deallocation, corrupt cache counts, concurrent mount reads, and cached
+file-size rendering. Run them with Address Sanitizer using:
+
+```bash
+./scripts/test-startup-safety.sh
+```
+
 The storage path in [`FileStore.swift`](Sources/IndexCore/FileStore.swift) and
 [`IndexActor.swift`](App/Sources/IndexActor.swift) shares an immutable,
 memory-mapped base between searches and the indexing writer. New records and

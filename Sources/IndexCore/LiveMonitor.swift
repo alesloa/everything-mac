@@ -16,12 +16,31 @@ public final class LiveMonitor: @unchecked Sendable {
         }
     }
 
-    private var stream: FSEventStreamRef?
-    private let onChanged: ([FSChange]) -> Void
+    // FSEvents owns this context independently of the monitor. A callback already
+    // in flight must never dereference a monitor being replaced or deallocated.
+    private final class CallbackContext: @unchecked Sendable {
+        private let lock = NSLock()
+        private var active = true
+        private let onChanged: @Sendable ([FSChange]) -> Void
 
-    public init(onChanged: @escaping ([FSChange]) -> Void) {
+        init(_ onChanged: @escaping @Sendable ([FSChange]) -> Void) { self.onChanged = onChanged }
+        func cancel() { lock.withLock { active = false } }
+        func deliver(_ changes: [FSChange]) {
+            guard lock.withLock({ active }) else { return }
+            onChanged(changes)
+        }
+    }
+
+    private let lifecycleLock = NSLock()
+    private var stream: FSEventStreamRef?
+    private var callbackContext: CallbackContext?
+    private let onChanged: @Sendable ([FSChange]) -> Void
+
+    public init(onChanged: @escaping @Sendable ([FSChange]) -> Void) {
         self.onChanged = onChanged
     }
+
+    deinit { stop() }
 
     // Re-scan one directory level and apply create/delete diffs against the store.
     // Returns whether anything was actually added or removed: the live path uses this
@@ -179,10 +198,23 @@ public final class LiveMonitor: @unchecked Sendable {
 
     public func start(paths: [String],
                       sinceWhen: FSEventStreamEventId = FSEventStreamEventId(kFSEventStreamEventIdSinceNow)) {
-        let info = Unmanaged.passUnretained(self).toOpaque()
-        var ctx = FSEventStreamContext(version: 0, info: info, retain: nil, release: nil, copyDescription: nil)
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        stopLocked()
+        let context = CallbackContext(onChanged)
+        var ctx = FSEventStreamContext(
+            version: 0, info: Unmanaged.passUnretained(context).toOpaque(),
+            retain: { info in
+                guard let info else { return nil }
+                return UnsafeRawPointer(Unmanaged<CallbackContext>.fromOpaque(info).retain().toOpaque())
+            },
+            release: { info in
+                guard let info else { return }
+                Unmanaged<CallbackContext>.fromOpaque(info).release()
+            }, copyDescription: nil)
         let cb: FSEventStreamCallback = { _, info, count, paths, flags, eventIDs in
-            let mon = Unmanaged<LiveMonitor>.fromOpaque(info!).takeUnretainedValue()
+            guard let info else { return }
+            let context = Unmanaged<CallbackContext>.fromOpaque(info).takeUnretainedValue()
             // Valid only because kFSEventStreamCreateFlagUseCFTypes is set below:
             // with that flag eventPaths is a CFArray<CFString>. Without it, paths
             // is a raw char** and this cast reads string bytes as a pointer →
@@ -196,7 +228,7 @@ public final class LiveMonitor: @unchecked Sendable {
                 changes.append(FSChange(path: p, mustScanSubtree: (flags[i] & mustScan) != 0,
                                         eventID: eventIDs[i]))
             }
-            mon.onChanged(changes)
+            context.deliver(changes)
         }
         // Directory-level events (NOT FileEvents). FSEvents coalesces and reports the
         // DIRECTORY in which something changed rather than emitting one path per
@@ -206,14 +238,29 @@ public final class LiveMonitor: @unchecked Sendable {
         // paths it couldn't act on.
         let flags = UInt32(kFSEventStreamCreateFlagNoDefer
                            | kFSEventStreamCreateFlagUseCFTypes)
-        stream = FSEventStreamCreate(nil, cb, &ctx, paths as CFArray, sinceWhen, 0.3, flags)
-        if let s = stream {
-            FSEventStreamSetDispatchQueue(s, DispatchQueue(label: "fsevents"))
-            FSEventStreamStart(s)
+        guard let s = FSEventStreamCreate(nil, cb, &ctx, paths as CFArray, sinceWhen, 0.3, flags) else { return }
+        FSEventStreamSetDispatchQueue(s, DispatchQueue(label: "fsevents"))
+        guard FSEventStreamStart(s) else {
+            context.cancel()
+            FSEventStreamInvalidate(s)
+            FSEventStreamRelease(s)
+            return
         }
+        stream = s
+        callbackContext = context
     }
 
     public func stop() {
-        if let s = stream { FSEventStreamStop(s); FSEventStreamInvalidate(s); FSEventStreamRelease(s); stream = nil }
+        lifecycleLock.withLock { stopLocked() }
+    }
+
+    private func stopLocked() {
+        callbackContext?.cancel()
+        callbackContext = nil
+        guard let s = stream else { return }
+        stream = nil
+        FSEventStreamStop(s)
+        FSEventStreamInvalidate(s)
+        FSEventStreamRelease(s)
     }
 }
