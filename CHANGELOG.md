@@ -22,6 +22,8 @@ All notable changes to EverythingMac are recorded here. The format is based on
 
 ### Fixed
 - Undo retains edited copies even when an in-place edit preserves the original byte count and restores the exact modification time.
+- Saved catalogs restore independently, so a corrupt catalog or mapping does not hide valid catalogs.
+- Quick Look requests stay attached to their originating search window and are canceled when that window closes.
 - Switching search tabs clears the previous tab's match count and validation error until the new search completes.
 - The content-search panel requires a valid filename query before offering scope controls.
 
