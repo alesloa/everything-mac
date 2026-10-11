@@ -4,7 +4,7 @@ public struct QueryEngine: Sendable {
     public init() {}
 
     // Pre-classified term: ASCII bytes (fast path) or String fallback.
-    private enum TermMatcher {
+    private enum TermMatcher: Sendable {
         case ascii([UInt8])   // lowercased ASCII pattern bytes
         case string(String)   // original term, for non-ASCII or case-sensitive fallback
     }
@@ -13,10 +13,13 @@ public struct QueryEngine: Sendable {
     // The substring/glob scan is the hot path; "Match whole word" is layered on top as
     // a cheap refinement pass over the already-narrowed result set, so the inner scan
     // loops stay exactly as fast as before and pay nothing when the option is off.
-    public func search(_ query: Query, in store: FileStore) -> [UInt32] {
-        let ids = rawSearch(query, in: store)
+    public func search(_ query: Query, in store: FileStore,
+                       isCancelled: @escaping @Sendable () -> Bool = { false }) -> [UInt32] {
+        if isCancelled() { return [] }
+        if query.hasFuzzyTerms { return matches(query, in: store, isCancelled: isCancelled).map(\.id) }
+        let ids = rawSearch(query, in: store, isCancelled: isCancelled)
         guard query.wholeWord else { return ids }
-        return ids.filter { wholeWordMatch(query, id: $0, in: store) }
+        return ids.filter { !isCancelled() && wholeWordMatch(query, id: $0, in: store) }
     }
 
     // Every plain (non-wildcard) term must occur as a whole word in the candidate's
@@ -33,7 +36,8 @@ public struct QueryEngine: Sendable {
     // For large stores the scan is split across cores — a per-keystroke linear scan
     // of millions of records is the floor for substring search, so parallelizing it
     // is what keeps typing instant.
-    private func rawSearch(_ query: Query, in store: FileStore) -> [UInt32] {
+    private func rawSearch(_ query: Query, in store: FileStore,
+                           isCancelled: @escaping @Sendable () -> Bool) -> [UInt32] {
         let terms = query.terms
         let n = store.count
         // Empty query = every record. With no tombstones the id range IS the answer
@@ -45,7 +49,10 @@ public struct QueryEngine: Sendable {
             var out = [UInt32](); out.reserveCapacity(n)
             var id: UInt32 = 0
             let upper = UInt32(n)
-            while id < upper { if store.isLive(id) { out.append(id) }; id &+= 1 }
+            while id < upper {
+                if id & 1023 == 0 && isCancelled() { return [] }
+                if store.isLive(id) { out.append(id) }; id &+= 1
+            }
             return out
         }
 
@@ -60,26 +67,25 @@ public struct QueryEngine: Sendable {
         // Serial below this threshold — thread fan-out isn't worth it for small stores.
         if n < 100_000 {
             return scanRange(0, UInt32(n), matchers: matchers, matchPath: matchPath,
-                             hasNonASCII: hasNonASCII, ci: ci, in: store)
+                             hasNonASCII: hasNonASCII, ci: ci, in: store, isCancelled: isCancelled)
         }
 
         // Parallel: each chunk scans a contiguous id range with the same inlined
         // loop; results are concatenated in chunk order so output stays id-ascending.
         // `store` crosses the boundary once per chunk (not per record), so the hot
         // loop stays inlinable and ARC-free per id.
-        let chunks = max(2, ProcessInfo.processInfo.activeProcessorCount)
+        let chunks = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount / 2))
         let span = (n + chunks - 1) / chunks
-        var parts = [[UInt32]](repeating: [], count: chunks)
-        parts.withUnsafeMutableBufferPointer { buf in
-            DispatchQueue.concurrentPerform(iterations: chunks) { c in
-                let lo = c * span
-                let hi = min(n, lo + span)
-                guard lo < hi else { return }
-                buf[c] = self.scanRange(UInt32(lo), UInt32(hi), matchers: matchers,
-                                        matchPath: matchPath, hasNonASCII: hasNonASCII, ci: ci, in: store)
-            }
+        let parts = SearchParts<UInt32>(count: chunks)
+        DispatchQueue.concurrentPerform(iterations: chunks) { c in
+            let lo = c * span
+            let hi = min(n, lo + span)
+            guard lo < hi else { return }
+            parts.set(self.scanRange(UInt32(lo), UInt32(hi), matchers: matchers,
+                                    matchPath: matchPath, hasNonASCII: hasNonASCII, ci: ci,
+                                    in: store, isCancelled: isCancelled), at: c)
         }
-        return parts.flatMap { $0 }
+        return isCancelled() ? [] : parts.joined()
     }
 
     // Scan ids in [lo, hi) and return those matching every term. The match logic is
@@ -87,7 +93,8 @@ public struct QueryEngine: Sendable {
     // common all-ASCII name scan allocates nothing and the optimizer can inline the
     // byte matcher. Called once per chunk — `store` is borrowed for the whole range.
     private func scanRange(_ lo: UInt32, _ hi: UInt32, matchers: [TermMatcher],
-                           matchPath: Bool, hasNonASCII: Bool, ci: Bool, in store: FileStore) -> [UInt32] {
+                           matchPath: Bool, hasNonASCII: Bool, ci: Bool, in store: FileStore,
+                           isCancelled: @Sendable () -> Bool) -> [UInt32] {
         var out: [UInt32] = []
         out.reserveCapacity(Int(hi - lo) / 64 + 16)
 
@@ -98,6 +105,7 @@ public struct QueryEngine: Sendable {
         if matchPath {
             var id = lo
             while id < hi {
+                if id & 1023 == 0 && isCancelled() { return [] }
                 if checkLive && !store.isLive(id) { id &+= 1; continue }
                 let pathStr = store.path(of: id)
                 var all = true
@@ -116,6 +124,7 @@ public struct QueryEngine: Sendable {
         } else if hasNonASCII {
             var id = lo
             while id < hi {
+                if id & 1023 == 0 && isCancelled() { return [] }
                 if checkLive && !store.isLive(id) { id &+= 1; continue }
                 let nameSlice = store.nameBytesSlice(of: id)
                 var all = true
@@ -137,6 +146,7 @@ public struct QueryEngine: Sendable {
             // Common case: all terms ASCII — zero String allocation per record.
             var id = lo
             while id < hi {
+                if id & 1023 == 0 && isCancelled() { return [] }
                 if checkLive && !store.isLive(id) { id &+= 1; continue }
                 let nameSlice = store.nameBytesSlice(of: id)
                 var all = true
@@ -154,14 +164,14 @@ public struct QueryEngine: Sendable {
 }
 
 public extension QueryEngine {
-    enum SortKey: Sendable { case name, path, size, mtime, kind }
+    enum SortKey: Sendable { case relevance, name, path, size, mtime, kind }
 
     // `a` ranks before `b` in ASCENDING order for the given key. Name uses the
     // allocation-free byte comparator; path falls back to a String compare (rare,
     // user-selected column). size/mtime are plain integer compares.
     private func ascendingLess(_ key: SortKey, in store: FileStore) -> (UInt32, UInt32) -> Bool {
         switch key {
-        case .name:  return { store.nameSortsBefore($0, $1) }
+        case .relevance, .name: return { store.nameSortsBefore($0, $1) }
         case .path:  return { store.path(of: $0).localizedStandardCompare(store.path(of: $1)) == .orderedAscending }
         case .size:  return { store.size(of: $0) < store.size(of: $1) }
         case .mtime: return { store.mtime(of: $0) < store.mtime(of: $1) }
@@ -181,7 +191,9 @@ public extension QueryEngine {
     /// for a short prefix, full-sorting every keystroke is what made typing lag;
     /// since the UI only ever shows `limit` rows, the rest never needs ordering.
     func sortedPrefix(_ ids: [UInt32], by key: SortKey, ascending: Bool,
-                      limit: Int, in store: FileStore) -> [UInt32] {
+                      limit: Int, in store: FileStore,
+                      isCancelled: @Sendable () -> Bool = { false }) -> [UInt32] {
+        guard limit > 0, !isCancelled() else { return [] }
         let asc = ascendingLess(key, in: store)
         let earlier: (UInt32, UInt32) -> Bool = ascending ? asc : { asc($1, $0) }
 
@@ -213,7 +225,8 @@ public extension QueryEngine {
             }
         }
 
-        for id in ids {
+        for (i, id) in ids.enumerated() {
+            if i & 1023 == 0 && isCancelled() { return [] }
             if heap.count < limit {
                 heap.append(id); siftUp(heap.count - 1)
             } else if earlier(id, heap[0]) {   // better than the worst kept → replace it

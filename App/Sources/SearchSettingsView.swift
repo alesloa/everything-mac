@@ -10,12 +10,20 @@ struct SearchSettingsView: View {
     var body: some View {
         Form {
             Section("Match options") {
+                // Source: the owner's fuzzy-search request and QueryEngine's ranking.
+                Toggle("Fuzzy matching", isOn: fuzzyBinding)
+                    .disabled(model.wholeWord)
+                if model.wholeWord {
+                    // Source: Query.hasFuzzyTerms disables fuzzy for whole-word queries.
+                    Text("Whole-word matching uses exact terms.").foregroundStyle(.secondary)
+                }
                 Toggle("Match case", isOn: caseBinding)
                 Toggle("Match whole word", isOn: wholeBinding)
                 Toggle("Search full path (not just the name)", isOn: matchPathBinding)
             }
             Section("Results") {
                 Picker("Sort by", selection: sortBinding) {
+                    Text("Relevance").tag(QueryEngine.SortKey.relevance)
                     Text("Name").tag(QueryEngine.SortKey.name)
                     Text("Path").tag(QueryEngine.SortKey.path)
                     Text("Size").tag(QueryEngine.SortKey.size)
@@ -23,8 +31,9 @@ struct SearchSettingsView: View {
                     Text("Date Modified").tag(QueryEngine.SortKey.mtime)
                 }
                 Picker("Order", selection: ascendingBinding) {
-                    Text("Ascending").tag(true)
-                    Text("Descending").tag(false)
+                    // Source: rankedPrefix defines ascending relevance as best first.
+                    Text(model.sortKey == .relevance ? "Best match first" : "Ascending").tag(true)
+                    Text(model.sortKey == .relevance ? "Best match last" : "Descending").tag(false)
                 }
                 Stepper(value: limitBinding, in: 100...100_000, step: 100) {
                     LabeledContent("Max results shown", value: model.resultLimit.formatted())
@@ -37,6 +46,9 @@ struct SearchSettingsView: View {
 
     private var caseBinding: Binding<Bool> {
         Binding(get: { model.caseSensitive }, set: { model.caseSensitive = $0; model.searchOptionsChanged() })
+    }
+    private var fuzzyBinding: Binding<Bool> {
+        Binding(get: { model.fuzzy }, set: { model.fuzzy = $0; model.searchOptionsChanged() })
     }
     private var wholeBinding: Binding<Bool> {
         Binding(get: { model.wholeWord }, set: { model.wholeWord = $0; model.searchOptionsChanged() })

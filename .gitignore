@@ -11,7 +11,12 @@ App/EverythingMac.app
 
 # Local test suites (individual regression files can be tracked explicitly).
 # Package.swift wires the test target only when the directory is present.
-Tests/
+Tests/*
+!Tests/IndexCoreTests/
+Tests/IndexCoreTests/*
+!Tests/IndexCoreTests/NetworkShareTests.swift
+!Tests/IndexCoreTests/FuzzySearchTests.swift
+!Tests/AppIntegrationTests/
 
 # macOS, logs, crash dumps
 .DS_Store

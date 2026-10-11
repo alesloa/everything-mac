@@ -8,7 +8,7 @@ final class AppModel: ObservableObject {
     @Published var query = ""
     @Published var results: [FileRecord] = []
     @Published var total = 0
-    @Published var sortKey: QueryEngine.SortKey = .name
+    @Published var sortKey: QueryEngine.SortKey = .relevance
     @Published var ascending = true
     @Published var matchPath = false
     // Live search modifiers (Everything's Match Case / Match Whole Word). Persisted
@@ -16,6 +16,7 @@ final class AppModel: ObservableObject {
     // re-runs the query instantly without re-indexing.
     @Published var caseSensitive = false
     @Published var wholeWord = false
+    @Published var fuzzy = true
     // Max rows handed to the table — the old hardcoded 5000 cap, now user-tunable.
     @Published var resultLimit = 5000
     @Published var rules: ExcludeRules = .defaults
@@ -44,6 +45,7 @@ final class AppModel: ObservableObject {
     private var bootstrapped = false
     private var indexStarted = false
     private var searchSeq = 0
+    private var searchTask: Task<[FileRecord], Never>?
 
     func bootstrap() {
         guard !bootstrapped else { return }
@@ -104,7 +106,7 @@ final class AppModel: ObservableObject {
                 }
             )
             scanning = false
-            total = await index.totalCount
+            total = index.totalCount
             rules = await index.currentRules()
             await runSearch()
             startFlushTimer()
@@ -158,6 +160,8 @@ final class AppModel: ObservableObject {
     func queryChanged() {
         savePrefs()   // also captures a Match-path toggle (shares this entry point)
         task?.cancel()
+        searchTask?.cancel()
+        searchSeq &+= 1
         task = Task {
             try? await Task.sleep(nanoseconds: 40_000_000) // debounce 40ms
             if Task.isCancelled { return }
@@ -175,14 +179,22 @@ final class AppModel: ObservableObject {
     }
 
     func runSearch() async {
+        guard !Task.isCancelled else { return }
+        searchTask?.cancel()
         searchSeq &+= 1
         let mySeq = searchSeq
-        let r = await index.search(query, matchPath: matchPath, caseInsensitive: !caseSensitive,
-                                   wholeWord: wholeWord, sort: sortKey, ascending: ascending, limit: resultLimit)
+        let query = query, matchPath = matchPath, caseInsensitive = !caseSensitive
+        let wholeWord = wholeWord, fuzzy = fuzzy, sort = sortKey, ascending = ascending, limit = resultLimit
+        let worker = Task {
+            await index.search(query, matchPath: matchPath, caseInsensitive: caseInsensitive,
+                               wholeWord: wholeWord, fuzzy: fuzzy, sort: sort, ascending: ascending, limit: limit)
+        }
+        searchTask = worker
+        let r = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
         // Only the most recently started search may publish — stops a slower
         // in-flight search (e.g. from a live-refresh tick) clobbering newer
         // results with a stale sort order.
-        if mySeq == searchSeq && !Task.isCancelled { results = r }
+        if mySeq == searchSeq && !Task.isCancelled && !worker.isCancelled { results = r }
     }
 
     // Coalesce bursts of FSEvents into at most one refresh per 200ms.
@@ -191,7 +203,7 @@ final class AppModel: ObservableObject {
         liveTask = Task {
             try? await Task.sleep(nanoseconds: 200_000_000)
             if Task.isCancelled { return }
-            total = await index.totalCount
+            total = index.totalCount
             await runSearch()
         }
     }
@@ -199,10 +211,8 @@ final class AppModel: ObservableObject {
     private func startFlushTimer() {
         flushTimer = Task {
             while !Task.isCancelled {
-                // 10 min, not 60s: a whole-disk index is millions of records, and
-                // flush() JSON-encodes the entire store on the actor (search waits).
-                // FSEvents replays anything missed since the last flush on relaunch,
-                // so a long interval only costs a little reconcile work after a crash.
+                // Save every ten minutes on the separate cache writer. Queries
+                // keep reading their snapshot throughout serialization and disk IO.
                 try? await Task.sleep(nanoseconds: 600_000_000_000) // 10 min
                 if Task.isCancelled { return }
                 await index.flush()
@@ -219,10 +229,14 @@ final class AppModel: ObservableObject {
         matchPath = d.bool(forKey: "pref.matchPath")
         caseSensitive = d.bool(forKey: "pref.caseSensitive")
         wholeWord = d.bool(forKey: "pref.wholeWord")
+        let hasFuzzyPref = d.object(forKey: "pref.fuzzy") != nil
+        fuzzy = hasFuzzyPref ? d.bool(forKey: "pref.fuzzy") : true
         let lim = d.integer(forKey: "pref.resultLimit")
         resultLimit = lim > 0 ? lim : 5000
-        if let sk = d.string(forKey: "pref.sortKey") { sortKey = Self.sortKey(from: sk) }
-        if d.object(forKey: "pref.ascending") != nil { ascending = d.bool(forKey: "pref.ascending") }
+        if hasFuzzyPref {
+            if let sk = d.string(forKey: "pref.sortKey") { sortKey = Self.sortKey(from: sk) }
+            if d.object(forKey: "pref.ascending") != nil { ascending = d.bool(forKey: "pref.ascending") }
+        }
     }
 
     func savePrefs() {
@@ -230,6 +244,7 @@ final class AppModel: ObservableObject {
         d.set(matchPath, forKey: "pref.matchPath")
         d.set(caseSensitive, forKey: "pref.caseSensitive")
         d.set(wholeWord, forKey: "pref.wholeWord")
+        d.set(fuzzy, forKey: "pref.fuzzy")
         d.set(resultLimit, forKey: "pref.resultLimit")
         d.set(Self.sortKeyName(sortKey), forKey: "pref.sortKey")
         d.set(ascending, forKey: "pref.ascending")
@@ -239,6 +254,7 @@ final class AppModel: ObservableObject {
     // for persistence.
     static func sortKeyName(_ k: QueryEngine.SortKey) -> String {
         switch k {
+        case .relevance: return "relevance"
         case .name:  return "name"
         case .path:  return "path"
         case .size:  return "size"
@@ -248,6 +264,7 @@ final class AppModel: ObservableObject {
     }
     static func sortKey(from s: String) -> QueryEngine.SortKey {
         switch s {
+        case "relevance": return .relevance
         case "path":  return .path
         case "size":  return .size
         case "mtime": return .mtime
@@ -266,7 +283,7 @@ final class AppModel: ObservableObject {
             await index.rescanAll()
             await index.flush()
             scanning = false
-            total = await index.totalCount
+            total = index.totalCount
             await runSearch()
         }
     }
@@ -281,7 +298,7 @@ final class AppModel: ObservableObject {
             // next launch sees a matching cache instead of rescanning again.
             await index.flush()
             scanning = false
-            total = await index.totalCount
+            total = index.totalCount
             await runSearch()
         }
     }

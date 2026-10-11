@@ -1,6 +1,6 @@
 # EverythingMac
 
-Type part of a filename and every file and folder that matches shows up instantly, across every mounted volume. It's a macOS clone of [Everything](https://www.voidtools.com/), the search tool I lived in back on Windows.
+Search files and folders across your disks as you type. Fuzzy matching finds abbreviated names and tolerates a single letter typo in longer terms, with the best matches first. It's a macOS clone of [Everything](https://www.voidtools.com/), the search tool I lived in back on Windows.
 
 ![EverythingMac searching across 8.2 million files](assets/screenshot.png)
 
@@ -20,7 +20,8 @@ So I wrote my own. It reads every filename on the machine into memory and search
 
 ## What it does
 
-- Searches every mounted volume, updating on each keystroke.
+- Fuzzy filename search enabled by default, with relevance ranking and an exact substring-search switch in the search bar. Quotes, wildcards, and Match Whole Word retain exact matching semantics.
+- Searches local volumes and selected network shares, updating on each keystroke.
 - Indexes the whole disk, files and folders, and keeps the index current through FSEvents.
 - Standard results table with Name, Path, Size, Kind, and Date Modified. Click a header to sort.
 - Shows the real file-type icon and a readable kind for each row.
@@ -28,6 +29,38 @@ So I wrote my own. It reads every filename on the machine into memory and search
 - Handles millions of files without choking. The index is a flat array scanned in parallel across all cores.
 - First-launch onboarding waits for Full Disk Access before scanning, with an option to continue without it.
 - Opt-in network-volume indexing in Settings > Volumes. Selected shares are scanned in the background, retain cached results while offline, and reconnect at launch and after sleep using credentials already saved in the keychain.
+- Searches immutable snapshots on separate workers. Directory reconciliation, full rebuilds, network-tree merges, and cache saves keep the last published files searchable; new changes appear after publication. Superseded queries are cancelled.
+
+### Fuzzy search
+
+Type `fnlrpt` to find a name such as `FinalReport.pdf`, or `repotr` to find
+`report.pdf`. Plain terms use subsequence matching; ASCII terms of at least five
+characters can tolerate one wrong, extra, missing, or swapped letter at a word
+prefix. The first letter must agree and digits are never corrected. Unicode
+terms support subsequence matching. Multiple terms are combined with AND.
+
+Use `"report"` for a literal substring, `rep*.pdf` for an anchored wildcard,
+or turn off **Fuzzy** for the previous substring behavior. **Match Whole Word**
+uses exact bounded terms. Select **View > Sort By > Relevance** for best matches
+first, or a table column for ordinary sorting. Fuzzy and relevance are the new
+defaults on upgrade; subsequent choices persist.
+
+The matcher adapts the MIT-licensed scoring used by
+[fsearch](https://github.com/noahdunnagan/fsearch), as integrated by
+[FinderSearch](https://github.com/zeusinsight/FinderSearch). EverythingMac stays
+entirely Swift and has no Rust helper dependency. See
+[third-party notices](THIRD_PARTY_NOTICES.md).
+
+To verify the non-blocking search path against the actual app indexing actor:
+
+```bash
+swift test -c release
+./scripts/test-search-isolation.sh
+```
+
+Snapshots share immutable name/metadata arrays through Swift copy-on-write.
+Changing the index can temporarily retain both the old and new arrays, trading
+additional memory during updates for independent search latency.
 
 ## Requirements
 

@@ -8,9 +8,11 @@ public final class LiveMonitor: @unchecked Sendable {
     public struct FSChange: Sendable {
         public let path: String
         public let mustScanSubtree: Bool
-        public init(path: String, mustScanSubtree: Bool) {
+        public let eventID: UInt64
+        public init(path: String, mustScanSubtree: Bool, eventID: UInt64 = 0) {
             self.path = path
             self.mustScanSubtree = mustScanSubtree
+            self.eventID = eventID
         }
     }
 
@@ -179,7 +181,7 @@ public final class LiveMonitor: @unchecked Sendable {
                       sinceWhen: FSEventStreamEventId = FSEventStreamEventId(kFSEventStreamEventIdSinceNow)) {
         let info = Unmanaged.passUnretained(self).toOpaque()
         var ctx = FSEventStreamContext(version: 0, info: info, retain: nil, release: nil, copyDescription: nil)
-        let cb: FSEventStreamCallback = { _, info, count, paths, flags, _ in
+        let cb: FSEventStreamCallback = { _, info, count, paths, flags, eventIDs in
             let mon = Unmanaged<LiveMonitor>.fromOpaque(info!).takeUnretainedValue()
             // Valid only because kFSEventStreamCreateFlagUseCFTypes is set below:
             // with that flag eventPaths is a CFArray<CFString>. Without it, paths
@@ -191,7 +193,8 @@ public final class LiveMonitor: @unchecked Sendable {
             changes.reserveCapacity(count)
             for i in 0..<count {
                 guard let p = cfArray[i] as? String else { continue }
-                changes.append(FSChange(path: p, mustScanSubtree: (flags[i] & mustScan) != 0))
+                changes.append(FSChange(path: p, mustScanSubtree: (flags[i] & mustScan) != 0,
+                                        eventID: eventIDs[i]))
             }
             mon.onChanged(changes)
         }

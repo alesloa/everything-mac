@@ -4,13 +4,16 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
-## [Unreleased]
+## [0.4.0] - Unreleased
 
 ### Added
+- Swift fuzzy filename search, relevance sorting, single-letter typo tolerance for longer ASCII terms, and a persisted switch back to substring matching.
 - Full Disk Access onboarding before the first scan, with settings, relaunch, and continue-without-access actions.
 - Opt-in network-volume indexing, background scans, offline cached search, and automatic reconnection using saved keychain credentials.
 
 ### Fixed
+- Searches and file counts no longer queue behind directory reconciliation, network-tree merges, or cache serialization; queries use immutable snapshots on separate workers.
+- Superseded searches stop scanning, and serial cache saves retain the last fully applied filesystem-event checkpoint and the snapshot's exclusion fingerprint.
 - Quitting permission onboarding no longer creates an empty cache that bypasses onboarding next launch.
 - Network mount availability no longer invalidates the cached index at launch.
 - Outdated network scans cannot reintroduce files excluded by changed settings, and local live indexing does not traverse network trees.
