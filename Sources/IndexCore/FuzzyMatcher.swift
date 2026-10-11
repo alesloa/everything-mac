@@ -35,7 +35,8 @@ enum FuzzyMatcher {
                 && nameMask & FuzzyMatcher.bit(bytes[0]) != 0)
         }
 
-        func score<Bytes: RandomAccessCollection>(_ name: Bytes, nameMask: UInt64) -> Int?
+        func score<Bytes: RandomAccessCollection>(_ name: Bytes, nameMask: UInt64,
+                                                 matchPath: Bool = false) -> Int?
             where Bytes.Element == UInt8, Bytes.Index == Int {
             let missing = mask & ~nameMask
             let clean = missing == 0 ? FuzzyMatcher.score(name, bytes, ci: caseInsensitive) : nil
@@ -45,7 +46,7 @@ enum FuzzyMatcher {
             // Digits are never edited: distinct numbered files stay distinct.
             var best = clean
             var start = name.startIndex
-            if name.count > 1 && name[start] == 46 { start += 1 }
+            if name.count > 1 && name[start] == 46 && bytes[0] != 46 { start += 1 }
             while start < name.endIndex {
                 if FuzzyMatcher.fold(name[start]) == bytes[0],
                    let length = FuzzyMatcher.oneEditPrefix(name[start...], bytes) {
@@ -54,9 +55,17 @@ enum FuzzyMatcher {
                         best = max(best ?? Int.min, s - 40)
                     }
                 }
-                if nameMask & FuzzyMatcher.bit(32) == 0 { break }
-                guard let space = name[start...].firstIndex(of: 32) else { break }
-                start = space + 1
+                if matchPath {
+                    // Full-path matching includes filename and directory prefixes.
+                    // Adding the parent path must not remove filename typo hits.
+                    guard let separator = name[start...].firstIndex(where: { $0 == 32 || $0 == 47 }) else { break }
+                    start = separator + 1
+                    if start + 1 < name.endIndex && name[start] == 46 && bytes[0] != 46 { start += 1 }
+                } else {
+                    if nameMask & FuzzyMatcher.bit(32) == 0 { break }
+                    guard let space = name[start...].firstIndex(of: 32) else { break }
+                    start = space + 1
+                }
             }
             return best
         }

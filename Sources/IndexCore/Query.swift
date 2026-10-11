@@ -16,6 +16,14 @@ public struct Query: Sendable, Equatable {
         self.fuzzy = fuzzy
     }
 
+    public static func == (lhs: Query, rhs: Query) -> Bool {
+        // Literal/glob matching compares Unicode scalars. Swift String equality
+        // normalizes equivalent spellings, which would reuse the wrong matches.
+        lhs.text.utf8.elementsEqual(rhs.text.utf8)
+            && lhs.matchPath == rhs.matchPath && lhs.caseInsensitive == rhs.caseInsensitive
+            && lhs.wholeWord == rhs.wholeWord && lhs.fuzzy == rhs.fuzzy
+    }
+
     // Whitespace-separated terms; quoted phrases kept intact.
     public var terms: [String] { tokens.map(\.text) }
 

@@ -219,3 +219,88 @@ private final class CancellationBudget: @unchecked Sendable {
         #expect(records.map(\.path) == paths)
     }
 }
+
+@Test func asciiQuestionGlobsCountUnicodeScalarsRatherThanUTF8Bytes() {
+    let store = fuzzyStore(["é.txt", "😀.txt", "e\u{301}.txt", "ab.txt"])
+    let engine = QueryEngine()
+    for fuzzy in [false, true] {
+        for caseInsensitive in [false, true] {
+            let one = Query(text: "?.txt", caseInsensitive: caseInsensitive, fuzzy: fuzzy)
+            #expect(engine.search(one, in: store) == [1, 2])
+            let two = Query(text: "??.txt", caseInsensitive: caseInsensitive, fuzzy: fuzzy)
+            #expect(engine.search(two, in: store) == [3, 4])
+            let separated = Query(text: "?*?.txt", caseInsensitive: caseInsensitive, fuzzy: fuzzy)
+            #expect(engine.search(separated, in: store) == [3, 4])
+        }
+    }
+    let names = UniqueNameIndex.forSnapshot(store)
+    #expect(engine.search(Query(text: "?.txt"), in: store, nameIndex: names) == [1, 2])
+    #expect(engine.search(Query(text: "?.txt"), in: store, candidates: [1, 3]) == [1])
+    #expect(engine.search(Query(text: "?.txt", matchPath: true), in: store).isEmpty)
+    #expect(engine.search(Query(text: "*/?.txt", matchPath: true), in: store) == [1, 2])
+}
+
+@Test func sortedPrefixMatchesFullSortWithEqualMetadata() {
+    var store = FileStore()
+    let root = store.append(name: "/", parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
+    let first = store.append(name: "a.txt", parent: root, size: 1, mtime: 1, isDir: false, volID: 1)
+    let second = store.append(name: "b.txt", parent: root, size: 1, mtime: 1, isDir: false, volID: 1)
+    let third = store.append(name: "c.txt", parent: root, size: 0, mtime: 0, isDir: false, volID: 1)
+    let engine = QueryEngine(), ids = [first, second, third]
+    for key in [QueryEngine.SortKey.size, .mtime] {
+        for ascending in [true, false] {
+            for limit in [1, 2, 3] {
+                #expect(engine.sortedPrefix(ids, by: key, ascending: ascending, limit: limit, in: store)
+                        == Array(engine.sort(ids, by: key, ascending: ascending, in: store).prefix(limit)))
+            }
+        }
+    }
+}
+
+private final class SearchReviewCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    private let cancelAt: Int
+    init(cancelAt: Int) { self.cancelAt = cancelAt }
+    func cancelled() -> Bool { lock.withLock { calls += 1; return calls >= cancelAt } }
+}
+
+@Test func exactSearchCancellationCannotReturnPartialWholeWordResults() {
+    let store = fuzzyStore(["report", "report.pdf", "annual report.pdf"])
+    let cancellation = SearchReviewCancellation(cancelAt: 4)
+    let hits = QueryEngine().search(Query(text: "report", wholeWord: true), in: store,
+                                    isCancelled: { cancellation.cancelled() })
+    #expect(hits.isEmpty)
+}
+
+@Test func fuzzyPathTyposMatchTheSameFilenamesAndDirectoryComponents() {
+    var store = fuzzyStore(["Docs"])
+    let report = store.append(name: "report.pdf", parent: 1, size: 1, mtime: 0, isDir: false, volID: 1)
+    let hidden = store.append(name: ".report.pdf", parent: 1, size: 1, mtime: 0, isDir: false, volID: 1)
+    let directory = store.append(name: "report", parent: 1, size: 0, mtime: 0, isDir: true, volID: 1)
+    let child = store.append(name: "notes.txt", parent: directory, size: 1, mtime: 0, isDir: false, volID: 1)
+    let engine = QueryEngine()
+    for text in ["repotr", "repxrt", "repport", "reprt"] {
+        let query = Query(text: text, matchPath: true, fuzzy: true)
+        #expect(engine.search(query, in: store) == [report, hidden, directory, child])
+        #expect(engine.search(query, in: store, candidates: [report, child]) == [report, child])
+    }
+    #expect(engine.search(Query(text: "qreport", matchPath: true, fuzzy: true), in: store).isEmpty)
+    #expect(engine.search(Query(text: ".repotr", matchPath: true, fuzzy: true), in: store) == [hidden])
+    #expect(engine.search(Query(text: ".repotr", fuzzy: true), in: store) == [hidden])
+    store.append(name: "report18.pdf", parent: 1, size: 1, mtime: 0, isDir: false, volID: 1)
+    #expect(engine.search(Query(text: "report98", matchPath: true, fuzzy: true), in: store).isEmpty)
+}
+
+@Test func sortedPrefixesRespectCancellationAfterTheirFinalSort() {
+    let store = fuzzyStore(["b.txt", "a.txt"])
+    let engine = QueryEngine(), ids: [UInt32] = [1, 2]
+    for limit in [1, 2] {
+        let cancellation = SearchReviewCancellation(cancelAt: limit == 1 ? 3 : 2)
+        #expect(engine.sortedPrefix(ids, by: .name, ascending: true, limit: limit, in: store,
+                                    isCancelled: { cancellation.cancelled() }).isEmpty)
+    }
+    let fuzzyCancellation = SearchReviewCancellation(cancelAt: 2)
+    #expect(engine.rankedPrefix([SearchMatch(id: 1, score: 10), SearchMatch(id: 2, score: 20)],
+                                limit: 2, in: store, isCancelled: { fuzzyCancellation.cancelled() }).isEmpty)
+}
