@@ -13,7 +13,7 @@ extension IndexActor {
 @main
 struct SearchIsolation {
     static func main() async throws {
-        let index = IndexActor()
+        let index = IndexActor(rules: .defaults)
         var store = FileStore()
         let root = store.append(name: "/", parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
         store.append(name: "FinalReport.pdf", parent: root, size: 1, mtime: 0, isDir: false, volID: 1)
