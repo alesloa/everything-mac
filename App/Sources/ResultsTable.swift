@@ -26,7 +26,7 @@ struct ResultsTable: NSViewRepresentable {
         table.usesAlternatingRowBackgroundColors = true
 
         // Right-click context menu — items target the coordinator; coordinator
-        // resolves the clicked row at action time via table.clickedRow. The
+        // pins the clicked record before tracking starts. The
         // "Open With" submenu is per-file, so it's rebuilt lazily by the coordinator
         // (its menu delegate) when the user hovers it — see menuNeedsUpdate.
         let menu = NSMenu()
@@ -42,6 +42,8 @@ struct ResultsTable: NSViewRepresentable {
         openWith.submenu = openWithSub
         menu.addItem(openWith)
         context.coordinator.openWithMenu = openWithSub
+        context.coordinator.contextMenu = menu
+        menu.delegate = context.coordinator
         menu.addItem(.separator())
         add("Reveal in Finder", #selector(Coordinator.ctxReveal))
         add("Copy Path", #selector(Coordinator.ctxCopyPath))
@@ -58,40 +60,36 @@ struct ResultsTable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        let coord = context.coordinator
-        let table = nsView.documentView as? NSTableView
-        // Pin selection to the FILE, not the row index. A live-index refresh replaces
-        // `results` ~constantly (FSEvents fires for any file change anywhere), and a
-        // plain reloadData drops or visually shifts the highlight out from under the
-        // user's click. Capture the selected record's stable store id from the OLD
-        // rows, reload, then re-select that same id in the NEW rows (gone only if the
-        // file dropped out of the result window).
-        let selectedID: UInt32? = {
-            guard let t = table, t.selectedRow >= 0, t.selectedRow < coord.parent.rows.count else { return nil }
-            return coord.parent.rows[t.selectedRow].id
-        }()
-        coord.parent = self
-        // Suppress the selection callback across reload+reselect: reloadData clears the
-        // selection (a spurious "nothing selected") and the reselect below re-sets the
-        // SAME file — neither is a user action, and firing onSelect here would mutate
-        // published model state mid-view-update. Genuine clicks happen outside this.
-        coord.suppressSelectionCallback = true
-        defer { coord.suppressSelectionCallback = false }
-        table?.reloadData()
-        if let id = selectedID, let t = table,
-           let row = rows.firstIndex(where: { $0.id == id }) {
-            t.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        }
+        context.coordinator.reload(self)
     }
 
     @MainActor final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         var parent: ResultsTable
         weak var table: NSTableView?
         weak var openWithMenu: NSMenu?
+        weak var contextMenu: NSMenu?
+        private var contextRecord: FileRecord?
         var suppressSelectionCallback = false
         init(_ p: ResultsTable) { parent = p }
 
         func numberOfRows(in tableView: NSTableView) -> Int { parent.rows.count }
+
+        func reload(_ next: ResultsTable) {
+            let selected: FileRecord? = table.flatMap { table in
+                parent.rows.indices.contains(table.selectedRow) ? parent.rows[table.selectedRow] : nil
+            }
+            parent = next
+            suppressSelectionCallback = true
+            defer { suppressSelectionCallback = false }
+            table?.reloadData()
+            if let selected, let row = parent.rows.firstIndex(where: { $0.id == selected.id && $0.path == selected.path }) {
+                table?.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            } else {
+                // Rebuilds reuse numeric IDs. Never keep the highlight on a new
+                // file that happens to occupy the old record's slot or row.
+                table?.deselectAll(nil)
+            }
+        }
 
         // Report the user's row pick up to the model so the menu bar can act on it.
         // Skipped during programmatic reselection (see updateNSView).
@@ -185,8 +183,11 @@ struct ResultsTable: NSViewRepresentable {
             if r >= 0 && r < parent.rows.count { parent.onActivate(parent.rows[r]) }
         }
 
-        // Context-menu handlers — resolve the right-clicked row, then delegate to ResultActions.
-        private func clickedRecord() -> FileRecord? {
+        // Context-menu handlers use the pinned right-click target.
+        func clickedRecord() -> FileRecord? {
+            // The main menu captures the file before tracking starts. Live results
+            // can reorder while the menu is open; actions keep the clicked path.
+            if contextMenu != nil { return contextRecord }
             guard let r = table?.clickedRow, r >= 0, r < parent.rows.count else { return nil }
             return parent.rows[r]
         }
@@ -206,6 +207,12 @@ struct ResultsTable: NSViewRepresentable {
         // marked), then the pinned editor, then a "Choose Application…" picker — so
         // there's always something to open with. Chosen app rides on representedObject.
         func menuNeedsUpdate(_ menu: NSMenu) {
+            if menu === contextMenu {
+                if let row = table?.clickedRow, parent.rows.indices.contains(row) {
+                    contextRecord = parent.rows[row]
+                } else { contextRecord = nil }
+                return
+            }
             guard menu === openWithMenu else { return }
             menu.removeAllItems()
             guard let rec = clickedRecord() else { return }
@@ -244,7 +251,7 @@ struct ResultsTable: NSViewRepresentable {
         }
 
         // Browse for any app to open the file with (Finder's "Open With ▸ Other…").
-        // Capture the record first — runModal blocks, but clickedRow stays valid.
+        // Capture the pinned record before the panel's nested event loop.
         @objc func ctxOpenWithChoose() {
             guard let r = clickedRecord() else { return }
             let panel = NSOpenPanel()

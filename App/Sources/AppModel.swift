@@ -6,7 +6,13 @@ import Combine
 @MainActor
 final class AppModel: ObservableObject {
     @Published var query = ""
-    @Published var results: [FileRecord] = []
+    @Published var results: [FileRecord] = [] {
+        didSet {
+            if let id = selectedID, results.first(where: { $0.id == id })?.path != selectedPath {
+                selectedID = nil
+            }
+        }
+    }
     @Published var total = 0
     @Published var sortKey: QueryEngine.SortKey = .relevance
     @Published var ascending = true
@@ -22,7 +28,10 @@ final class AppModel: ObservableObject {
     @Published var rules: ExcludeRules = .defaults
     @Published var scanning = false
     @Published var shares: [NetworkShareStatus] = []
-    @Published var selectedID: UInt32?
+    @Published var selectedID: UInt32? {
+        didSet { selectedPath = selectedID.flatMap { id in results.first { $0.id == id }?.path } }
+    }
+    private var selectedPath: String?
     // Bumped to ask the focused window to put the cursor in the search field (⌘F /
     // File ▸ Find). A counter, not a Bool, so repeated requests always fire onChange.
     @Published var focusSearchSignal = 0
@@ -30,12 +39,14 @@ final class AppModel: ObservableObject {
     // True while the first-launch onboarding is shown instead of the search UI.
     @Published var awaitingFullDiskAccess = false
 
-    // The currently-selected result, resolved by stable store id against the live
-    // result set. nil once the file drops out of results, which auto-disables the
-    // selection-dependent menu items.
-    var selected: FileRecord? { selectedID.flatMap { id in results.first { $0.id == id } } }
+    // IDs are stable within one store, but a rebuild can reuse them. Resolve both
+    // ID and path so selection-dependent commands retain the same file target.
+    var selected: FileRecord? {
+        selectedID.flatMap { id in results.first { $0.id == id && $0.path == selectedPath } }
+    }
 
-    let index = IndexActor()
+    let index: IndexActor
+    private let preferences: UserDefaults
     private var task: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
     private var flushTimer: Task<Void, Never>?
@@ -46,6 +57,13 @@ final class AppModel: ObservableObject {
     private var indexStarted = false
     private var searchSeq = 0
     private var searchTask: Task<[FileRecord], Never>?
+    private var rebuildTask: Task<Void, Never>?
+    private var activeScanID: UUID?
+
+    init(index: IndexActor = IndexActor(), preferences: UserDefaults = .standard) {
+        self.index = index
+        self.preferences = preferences
+    }
 
     func bootstrap() {
         guard !bootstrapped else { return }
@@ -93,22 +111,30 @@ final class AppModel: ObservableObject {
     private func startIndex() {
         guard !indexStarted else { return }
         indexStarted = true
+        let scanID = UUID()
+        activeScanID = scanID
+        scanning = true
         Task {
             await index.startUp(
+                scanID: scanID,
                 onLiveChange: { [weak self] in
                     Task { @MainActor in self?.liveRefresh() }
                 },
-                onProgress: { [weak self] count in
-                    Task { @MainActor in self?.onScanProgress(count) }
+                onProgress: { [weak self] count, id in
+                    Task { @MainActor in self?.onScanProgress(count, scanID: id) }
                 },
                 onShareStatus: { [weak self] status in
                     Task { @MainActor in self?.shares = status }
                 }
             )
-            scanning = false
-            total = index.totalCount
-            rules = await index.currentRules()
-            await runSearch()
+            let currentRules = await index.currentRules()
+            if activeScanID == scanID {
+                activeScanID = nil
+                scanning = false
+                total = index.totalCount
+                rules = currentRules
+                await runSearch()
+            }
             startFlushTimer()
             startCloudSweep()
             startShareCheck()
@@ -122,6 +148,7 @@ final class AppModel: ObservableObject {
     }
 
     func reconnectShares() { Task { await index.reconnectShares() } }
+    func reconnectShare(_ share: NetworkShare) { Task { await index.reconnectShare(share) } }
 
     // FSEvents never fire for network shares, and a mount can come and go without
     // touching /Volumes in a way we see, so poll the mount table as a safety net.
@@ -147,10 +174,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // Driven by the off-actor scan: flips into "indexing" mode and streams the
-    // running count to the status bar as the new index builds.
-    func onScanProgress(_ count: Int) {
-        scanning = true
+    // Progress belongs to a particular rebuild. Main-actor callbacks already in
+    // flight may arrive after that rebuild finished or was superseded.
+    func onScanProgress(_ count: Int, scanID: UUID) {
+        guard scanning, activeScanID == scanID else { return }
         total = count
         // No live search here: during the initial build the actor serves the OLD
         // index, so re-searching every tick just churns. Results refresh once when
@@ -203,7 +230,7 @@ final class AppModel: ObservableObject {
         liveTask = Task {
             try? await Task.sleep(nanoseconds: 200_000_000)
             if Task.isCancelled { return }
-            total = index.totalCount
+            if !scanning { total = index.totalCount }
             await runSearch()
         }
     }
@@ -225,7 +252,7 @@ final class AppModel: ObservableObject {
     // MARK: - Search preference persistence (UserDefaults)
 
     func loadPrefs() {
-        let d = UserDefaults.standard
+        let d = preferences
         matchPath = d.bool(forKey: "pref.matchPath")
         caseSensitive = d.bool(forKey: "pref.caseSensitive")
         wholeWord = d.bool(forKey: "pref.wholeWord")
@@ -240,7 +267,7 @@ final class AppModel: ObservableObject {
     }
 
     func savePrefs() {
-        let d = UserDefaults.standard
+        let d = preferences
         d.set(matchPath, forKey: "pref.matchPath")
         d.set(caseSensitive, forKey: "pref.caseSensitive")
         d.set(wholeWord, forKey: "pref.wholeWord")
@@ -278,25 +305,33 @@ final class AppModel: ObservableObject {
     // wants to be sure it's fresh. Persists the result so the next launch matches.
     func rebuildIndex() {
         guard !scanning else { return }
-        Task {
-            scanning = true
-            await index.rescanAll()
-            await index.flush()
-            scanning = false
-            total = index.totalCount
-            await runSearch()
-        }
+        beginRebuild(rules: nil)
     }
 
     func applyRules(_ newRules: ExcludeRules) {
-        Task {
-            await index.setRules(newRules)
-            rules = newRules
-            scanning = true
-            await index.rescanAll()
+        beginRebuild(rules: newRules)
+    }
+
+    private func beginRebuild(rules newRules: ExcludeRules?) {
+        let scanID = UUID()
+        activeScanID = scanID
+        rebuildTask?.cancel()
+        // Disable Rebuild synchronously: two commands in one main-actor turn must
+        // not enqueue two complete walks before either task sets this flag.
+        scanning = true
+        if let newRules { rules = newRules }
+        rebuildTask = Task {
+            guard !Task.isCancelled, activeScanID == scanID else { return }
+            if let newRules { await index.setRules(newRules) }
+            guard !Task.isCancelled, activeScanID == scanID else { return }
+            let completed = await index.rescanAll(scanID: scanID)
+            guard !Task.isCancelled, activeScanID == scanID else { return }
             // Persist the freshly-rebuilt index with the new rules' fingerprint, so the
             // next launch sees a matching cache instead of rescanning again.
-            await index.flush()
+            if completed { await index.flush() }
+            guard !Task.isCancelled, activeScanID == scanID else { return }
+            activeScanID = nil
+            rebuildTask = nil
             scanning = false
             total = index.totalCount
             await runSearch()

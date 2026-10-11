@@ -18,8 +18,10 @@ struct GeneralSettingsView: View {
                 if let s = Self.cacheStats() {
                     LabeledContent("Cache size",
                                    value: ByteCountFormatter.string(fromByteCount: s.size, countStyle: .file))
-                    LabeledContent("Last saved",
-                                   value: s.modified.formatted(date: .abbreviated, time: .shortened))
+                    if let modified = s.modified {
+                        LabeledContent("Last saved",
+                                       value: modified.formatted(date: .abbreviated, time: .shortened))
+                    }
                 } else {
                     LabeledContent("Cache", value: "not written yet")
                 }
@@ -32,11 +34,12 @@ struct GeneralSettingsView: View {
     }
 
     // Size + mtime of the on-disk index cache (~/Library/Application Support/...).
-    static func cacheStats() -> (size: Int64, modified: Date)? {
+    static func cacheStats() -> (size: Int64, modified: Date?)? {
         let path = IndexActor.cacheURL().path
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               let size = (attrs[.size] as? NSNumber)?.int64Value else { return nil }
-        let date = (attrs[.modificationDate] as? Date) ?? Date(timeIntervalSince1970: 0)
+        // Source: FileManager's modificationDate attribute; omit an absent date.
+        let date = attrs[.modificationDate] as? Date
         return (size, date)
     }
 }
