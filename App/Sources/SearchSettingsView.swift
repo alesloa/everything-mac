@@ -12,7 +12,7 @@ struct SearchSettingsView: View {
             Section("Match options") {
                 // Source: the owner's fuzzy-search request and QueryEngine's ranking.
                 Toggle("Fuzzy matching", isOn: fuzzyBinding)
-                    .disabled(model.wholeWord)
+                    .disabled(model.wholeWord || model.regex || model.matchPrefix || model.matchSuffix)
                 if model.wholeWord {
                     // Source: Query.hasFuzzyTerms disables fuzzy for whole-word queries.
                     Text("Whole-word matching uses exact terms.").foregroundStyle(.secondary)
@@ -22,6 +22,9 @@ struct SearchSettingsView: View {
                 Toggle("Search full path (not just the name)", isOn: matchPathBinding)
             }
             Section("Results") {
+                // Source: the preview access policy requires an explicit opt-in before reading network files.
+                Toggle("Allow network previews and thumbnails", isOn: Binding(
+                    get: { model.previewAllowsNetwork }, set: { model.previewAllowsNetwork = $0; model.savePrefs() }))
                 Picker("Sort by", selection: sortBinding) {
                     Text("Relevance").tag(QueryEngine.SortKey.relevance)
                     Text("Name").tag(QueryEngine.SortKey.name)

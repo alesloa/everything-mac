@@ -24,10 +24,13 @@ import IndexCore
         let completed = await index.rescanAll()
         precondition(completed)
         let background = AppModel(index: index, preferences: preferences)
-        let first = AppModel(index: index, preferences: preferences)
-        let second = AppModel(index: index, preferences: preferences)
+        let first = AppModel(index: index, preferences: preferences,
+            workspace: SearchWorkspaceController(library: background.workspace.library))
+        let second = AppModel(index: index, preferences: preferences,
+            workspace: SearchWorkspaceController(library: background.workspace.library))
         first.prepareWindow(with: background)
         second.prepareWindow(with: background)
+        first.restoreWorkspace(); second.restoreWorkspace()
         first.fuzzy = false; second.fuzzy = false
         first.query = "first"; second.query = "second"
         await first.runSearch(); await second.runSearch()
@@ -47,6 +50,28 @@ import IndexCore
         background.indexRevision &+= 1
         try await Task.sleep(for: .milliseconds(100))
         precondition(first.results.map(\.name) == ["first.txt"] && second.results.map(\.name) == ["second.txt"])
+        first.query = "first"
+        let saved = try first.saveCurrentSearch(name: "First files", macroName: "firstfiles")
+        precondition(second.workspace.library.archive.savedSearches.contains { $0.id == saved.id })
+        first.query = "macro:firstfiles"
+        await first.runSearch()
+        precondition(first.searchError == nil && first.results.map(\.name) == ["first.txt"])
+        first.query = "macro:missing"
+        await first.runSearch()
+        precondition(first.searchError != nil && first.results.isEmpty, "Invalid macros widened the query")
+        first.query = "first"; first.searchError = nil
+        first.workspaceStateChanged()
+        let originalTab = first.workspace.window.selectedTabID
+        first.newSearchTab()
+        first.query = "second"; first.workspaceStateChanged()
+        first.selectSearchTab(originalTab)
+        await first.runSearch()
+        precondition(first.query == "first" && first.results.map(\.name) == ["first.txt"])
+        precondition(second.query == "second" && second.workspace.window.tabs.count == 1)
+        first.persistWorkspace(); second.persistWorkspace()
+        let restored = WorkspaceLibrary(preferences: preferences)
+        precondition(restored.archive.windows.count == 2)
+        precondition(restored.archive.windows.contains { $0.tabs.count == 2 })
         print("PASS: windows keep independent searches and receive shared index updates")
     }
 }

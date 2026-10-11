@@ -17,7 +17,7 @@ for app_test_source in Tests/AppIntegrationTests/AppSafety.swift \
     swiftc -O -swift-version 6 -parse-as-library -I .build/release/Modules \
         "${app_test_inputs[@]}" "$app_test_source" .build/release/IndexCore.build/*.o \
         -framework CoreServices -framework NetFS -framework AppKit -framework SwiftUI \
-        -framework QuickLookUI -framework Carbon \
+        -framework QuickLookUI -framework QuickLookThumbnailing -framework ImageIO -framework Carbon \
         -o "$app_test_binary"
     "$app_test_binary"
 done

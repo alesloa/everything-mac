@@ -4,19 +4,14 @@ import AppKit
 @main
 struct EverythingMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model = AppModel()
+    @StateObject private var background = AppModel()
     var body: some Scene {
-        WindowGroup("Everything-Mac") {
-            ContentView().environmentObject(model)
-                .frame(minWidth: 800, minHeight: 500)
-                .onAppear {
-                    appDelegate.model = model
-                    model.bootstrap()
-                }
+        WindowGroup("Everything-Mac", id: "search", for: String.self) { windowID in
+            SearchWindowRoot(background: background, delegate: appDelegate, windowID: windowID.wrappedValue)
         }
-        .commands { AppCommands(model: model) }
+        .commands { FocusedSearchCommands() }
         Settings {
-            SettingsView().environmentObject(model)
+            SearchSettingsRoot(background: background, delegate: appDelegate)
         }
     }
 }
