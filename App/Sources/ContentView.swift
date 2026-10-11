@@ -104,10 +104,13 @@ struct ContentView: View {
                     query: try? model.featureQueryResult.get(), selectedPaths: model.actionRecords.map(\.path),
                     folderPath: model.folderScope?.path)
             case .contentSearch:
-                if case .failure(let error) = model.featureQueryResult { featureError(error) }
-                ContentSearchView(index: model.index.searchIndex,
-                    query: try? model.featureQueryResult.get(), selectedPaths: model.actionRecords.map(\.path),
-                    folderPath: model.folderScope?.path)
+                switch model.featureQueryResult {
+                case .success(let query):
+                    ContentSearchView(index: model.index.searchIndex,
+                        query: query, selectedPaths: model.actionRecords.map(\.path),
+                        folderPath: model.folderScope?.path)
+                case .failure(let error): featureError(error)
+                }
             case .activity: IndexActivityView(index: model.index)
             }
         }
