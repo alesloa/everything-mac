@@ -4,7 +4,7 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-10-11
 
 ### Added
 - A Filters button with multiple file types and strict Over/Under size limits in B, KB, MB, GB, or TB, retained in tabs and saved searches.
@@ -20,6 +20,12 @@ All notable changes to EverythingMac are recorded here. The format is based on
 - Optional scoped content search for supported text, source, raw HTML, and PDF text, with cancellation and file-size limits.
 - A read-only `everything` command-line tool using the saved index and shared query/export behavior. See [COMMAND_LINE.md](COMMAND_LINE.md).
 - An index activity viewer with bounded observed events and actual scan, cache, and network status.
+- Swift fuzzy filename search, relevance sorting, single-letter typo tolerance for longer ASCII terms, and a persisted switch back to substring matching.
+- Full Disk Access onboarding before the first scan, with settings, relaunch, and continue-without-access actions.
+- Opt-in network-volume indexing, background scans, offline cached search, and automatic reconnection using saved keychain credentials.
+- Incremental query narrowing that rechecks the complete previous match set when a query extension cannot add matches.
+- A background filename dictionary with character bitmaps that filters groups of 64 names and shares matching work across duplicate filenames.
+- Memory-mapped index bases, small live-update overlays, streamed atomic cache saves, and background compaction that preserves record IDs and in-flight snapshots.
 
 ### Fixed
 - Everything is a select-all checkbox, and Files can remain checked alongside specific file categories.
@@ -32,18 +38,6 @@ All notable changes to EverythingMac are recorded here. The format is based on
 - Quick Look requests stay attached to their originating search window and are canceled when that window closes.
 - Switching search tabs clears the previous tab's match count and validation error until the new search completes.
 - The content-search panel requires a valid filename query before offering scope controls.
-
-## [0.4.0] - Unreleased
-
-### Added
-- Swift fuzzy filename search, relevance sorting, single-letter typo tolerance for longer ASCII terms, and a persisted switch back to substring matching.
-- Full Disk Access onboarding before the first scan, with settings, relaunch, and continue-without-access actions.
-- Opt-in network-volume indexing, background scans, offline cached search, and automatic reconnection using saved keychain credentials.
-- Incremental query narrowing that rechecks the complete previous match set when a query extension cannot add matches.
-- A background filename dictionary with character bitmaps that filters groups of 64 names and shares matching work across duplicate filenames.
-- Memory-mapped index bases, small live-update overlays, streamed atomic cache saves, and background compaction that preserves record IDs and in-flight snapshots.
-
-### Fixed
 - Releasing or restarting the filesystem watcher now stops the previous stream and keeps in-flight callback data alive, preventing callbacks from reading freed memory.
 - Concurrent mount-table reads use separate owned buffers; native file icons and file actions are confined to the main actor.
 - Result rendering safely handles stale row requests and unsigned file sizes beyond the signed formatter's range without changing their values.
@@ -103,8 +97,7 @@ All notable changes to EverythingMac are recorded here. The format is based on
 ### Added
 - First public release. Instant filename and folder search across every mounted volume, updating as you type. FSEvents-backed live index, a binary on-disk cache for instant restarts, and right-click actions (Open, Open With, Reveal in Finder, Copy Path/Name, Move to Trash).
 
-[0.5.0]: https://github.com/alesloa/everything-mac/compare/v0.3.0...main
-[0.4.0]: https://github.com/alesloa/everything-mac/compare/v0.3.0...main
+[0.5.0]: https://github.com/alesloa/everything-mac/compare/v0.3.0...v0.5.0
 [0.3.0]: https://github.com/alesloa/everything-mac/releases/tag/v0.3.0
 [0.2.2]: https://github.com/alesloa/everything-mac/releases/tag/v0.2.2
 [0.2.1]: https://github.com/alesloa/everything-mac/releases/tag/v0.2.1
