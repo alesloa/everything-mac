@@ -31,7 +31,12 @@ public enum ParallelScanner {
 
         // Append all children of `parent`, returning their ids in input order so
         // the caller can pair subdirectory entries with their new ids.
-        func markIncomplete() { lock.withLock { store.markScanIncomplete() } }
+        func markIncomplete(_ parent: UInt32) {
+            lock.withLock {
+                store.markScanIncomplete()
+                store.setSubtreeIncomplete(parent, true)
+            }
+        }
 
         func appendChildren(_ entries: [Entry], parent: UInt32,
                             isCancelled: @Sendable () -> Bool) -> [UInt32] {
@@ -112,8 +117,8 @@ public enum ParallelScanner {
         let rootName = Scanner.normalizedRoot(root)
         guard let rootEntries = readDirectory(rootName, root: rootName, rules: rules, isCancelled: isCancelled) else { return FileStore() }
         let builder = Builder(volID: volID, progress: progress)
-        if rootEntries.incomplete { builder.markIncomplete() }
         let rootID = builder.appendRoot(name: rootName)
+        if rootEntries.incomplete { builder.markIncomplete(rootID) }
         let ids = builder.appendChildren(rootEntries.entries, parent: rootID, isCancelled: isCancelled)
         let initial = zip(rootEntries.entries, ids).filter { $0.0.isDir }.map { ($0.0.path, $0.1) }
         let queue = DirQueue(seed: initial)
@@ -121,9 +126,9 @@ public enum ParallelScanner {
         DispatchQueue.concurrentPerform(iterations: max(1, workers)) { _ in
             while let (path, parent) = queue.claim(isCancelled: isCancelled) {
                 guard let listing = readDirectory(path, root: rootName, rules: rules, isCancelled: isCancelled) else {
-                    builder.markIncomplete(); queue.release(); continue
+                    builder.markIncomplete(parent); queue.release(); continue
                 }
-                if listing.incomplete { builder.markIncomplete() }
+                if listing.incomplete { builder.markIncomplete(parent) }
                 let entries = listing.entries
                 let ids = builder.appendChildren(entries, parent: parent, isCancelled: isCancelled)
                 var subdirs: [(String, UInt32)] = []
