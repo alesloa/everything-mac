@@ -10,6 +10,9 @@ import Combine
 
 @main struct QuickLookTests {
     @MainActor static func main() {
+        if CommandLine.arguments.contains("--verify-failure-exit") {
+            check(false, "Intentional preview assertion failure")
+        }
         let app = NSApplication.shared
         Task { @MainActor in
             do { try await run() }
@@ -41,7 +44,7 @@ import Combine
         let missing = record(directory.appendingPathComponent("missing.png"), id: 4)
 
         let resolved = await PreviewFileAccess.resolve(image)
-        precondition(resolved != nil, "Existing local PNG must be eligible")
+        check(resolved != nil, "Existing local PNG must be eligible")
         check(await PreviewFileAccess.resolve(text) != nil)
         check(await PreviewFileAccess.resolve(unknown) != nil, "Native Quick Look decides format support")
         check(await PreviewFileAccess.resolve(missing) == nil)
@@ -56,7 +59,7 @@ import Combine
 
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1234)], ofItemAtPath: imageURL.path)
         let changed = await PreviewFileAccess.resolve(image)
-        precondition(changed?.fingerprint != resolved?.fingerprint, "Cache key must use current disk metadata")
+        check(changed?.fingerprint != resolved?.fingerprint, "Cache key must use current disk metadata")
         try FileManager.default.removeItem(at: textURL)
         check(await PreviewFileAccess.resolve(text) == nil, "Deleted indexed files must not preview")
 
@@ -65,20 +68,20 @@ import Combine
         selectionTests(image, unknown)
         let service = ThumbnailService(cache: ThumbnailCache(countLimit: 2, costLimit: 2 * 1024 * 1024), concurrencyLimit: 1)
         let thumbnail = await service.image(for: image)
-        precondition(thumbnail != nil, "QuickLookThumbnailing must generate the real PNG fixture")
-        precondition(service.cache.count == 1)
+        check(thumbnail != nil, "QuickLookThumbnailing must generate the real PNG fixture")
+        check(service.cache.count == 1)
         let cached = await service.image(for: image)
-        precondition(cached === thumbnail, "Identical live metadata should reuse the cached native image")
+        check(cached === thumbnail, "Identical live metadata should reuse the cached native image")
         check(await service.image(for: missing) == nil)
         _ = await service.image(for: unknown)
         let cancelledThumbnail = Task { await service.image(for: image, size: 511) }
         cancelledThumbnail.cancel()
         check(await cancelledThumbnail.value == nil)
-        precondition(service.activeCount == 0 && service.queuedCount == 0)
+        check(service.activeCount == 0 && service.queuedCount == 0)
         let requests = (0..<12).map { size in Task { await service.image(for: image, size: CGFloat(200 + size)) } }
         for request in requests { request.cancel() }
         for request in requests { check(await request.value == nil) }
-        precondition(service.activeCount == 0 && service.queuedCount == 0)
+        check(service.activeCount == 0 && service.queuedCount == 0)
         try await scheduledCancellationTests(image)
         try await viewportTests(directory, imageURL)
         try await windowLifetimeTests(image, unknown)
@@ -88,15 +91,21 @@ import Combine
         controller.close()
         controller.show([missing])
         try await Task.sleep(for: .milliseconds(30))
-        precondition(controller.numberOfPreviewItems(in: nil) == 0)
-        precondition(controller.previewPanel(nil, previewItemAt: -1) == nil)
-        precondition(controller.previewPanel(nil, previewItemAt: Int.max) == nil)
+        check(controller.numberOfPreviewItems(in: nil) == 0)
+        check(controller.previewPanel(nil, previewItemAt: -1) == nil)
+        check(controller.previewPanel(nil, previewItemAt: Int.max) == nil)
         controller.close()
         print("PASS: native PNG thumbnails, live-file cache keys, bounded cache, viewport-only generation, in-flight/queued cancellation, stale selection, keyboard focus, window ownership and missing/unsupported files")
     }
 
-    private static func check(_ value: Bool, _ message: String = "Native preview assertion failed") {
-        precondition(value, message)
+    private static func check(_ value: Bool, _ message: String = "Native preview assertion failed",
+                              file: StaticString = #filePath, line: UInt = #line) {
+        guard value else { fail(message, file: file, line: line) }
+    }
+
+    private static func fail(_ message: String, file: StaticString = #filePath, line: UInt = #line) -> Never {
+        print("FAIL: \(message) (\(file):\(line))")
+        exit(EXIT_FAILURE)
     }
 
     private static func record(_ url: URL, id: UInt32, isDir: Bool = false) -> FileRecord {
@@ -111,7 +120,7 @@ import Combine
         context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
         let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
         CGImageDestinationAddImage(destination, context.makeImage()!, nil)
-        precondition(CGImageDestinationFinalize(destination))
+        check(CGImageDestinationFinalize(destination))
     }
 
     @MainActor private static func keyboardTests(_ image: FileRecord) throws {
@@ -121,14 +130,14 @@ import Combine
                 charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode)!
         }
         let space = event(49, " ")
-        precondition(ResultsKeyAction.action(for: space, isResultsFirstResponder: true) == .preview)
-        precondition(ResultsKeyAction.action(for: space, isResultsFirstResponder: false) == nil)
-        precondition(ResultsKeyAction.action(for: event(49, " ", .command), isResultsFirstResponder: true) == nil)
-        precondition(ResultsKeyAction.action(for: event(36, "\r"), isResultsFirstResponder: true) == .open)
-        precondition(ResultsKeyAction.action(for: event(8, "c", .command), isResultsFirstResponder: true) == .copy)
-        precondition(ResultsKeyAction.action(for: event(9, "v", .command), isResultsFirstResponder: true) == .paste)
-        precondition(ResultsKeyAction.action(for: event(6, "z", .command), isResultsFirstResponder: true) == .undo)
-        precondition(ResultsKeyAction.action(for: event(6, "z", [.command, .shift]), isResultsFirstResponder: true) == nil)
+        check(ResultsKeyAction.action(for: space, isResultsFirstResponder: true) == .preview)
+        check(ResultsKeyAction.action(for: space, isResultsFirstResponder: false) == nil)
+        check(ResultsKeyAction.action(for: event(49, " ", .command), isResultsFirstResponder: true) == nil)
+        check(ResultsKeyAction.action(for: event(36, "\r"), isResultsFirstResponder: true) == .open)
+        check(ResultsKeyAction.action(for: event(8, "c", .command), isResultsFirstResponder: true) == .copy)
+        check(ResultsKeyAction.action(for: event(9, "v", .command), isResultsFirstResponder: true) == .paste)
+        check(ResultsKeyAction.action(for: event(6, "z", .command), isResultsFirstResponder: true) == .undo)
+        check(ResultsKeyAction.action(for: event(6, "z", [.command, .shift]), isResultsFirstResponder: true) == nil)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
             styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -147,17 +156,17 @@ import Combine
         window.contentView = root
         var previews = 0
         table.onResultKey = { action in if action == .preview { previews += 1; return true }; return false }
-        precondition(window.makeFirstResponder(table))
+        check(window.makeFirstResponder(table))
         table.keyDown(with: space)
-        precondition(previews == 1)
+        check(previews == 1)
         var copied = false
         table.onResultKey = { action in copied = action == .copy; return copied }
-        precondition(table.performKeyEquivalent(with: event(8, "c", .command)))
-        precondition(copied)
+        check(table.performKeyEquivalent(with: event(8, "c", .command)))
+        check(copied)
         window.makeFirstResponder(field)
         field.currentEditor()?.insertText(" ")
-        precondition(field.stringValue == " ", "The native field editor must receive spaces")
-        precondition(previews == 1)
+        check(field.stringValue == " ", "The native field editor must receive spaces")
+        check(previews == 1)
         window.close()
     }
 
@@ -189,36 +198,36 @@ import Combine
         }
 
         controller.show([image])
-        precondition(controller.hasPendingRequest)
+        check(controller.hasPendingRequest)
         activeWindow.window = b
         try await waitUntil { !controller.hasPendingRequest }
-        precondition(controller.numberOfPreviewItems(in: nil) == 0,
+        check(controller.numberOfPreviewItems(in: nil) == 0,
                      "A request must not publish when another search window becomes active")
-        precondition(a.nextResponder === originalA && b.nextResponder === originalB)
+        check(a.nextResponder === originalA && b.nextResponder === originalB)
 
         activeWindow.window = a
         controller.show([image])
-        precondition(controller.hasPendingRequest)
+        check(controller.hasPendingRequest)
         a.close()
-        precondition(!controller.hasPendingRequest, "Closing the owner must cancel its pending request immediately")
+        check(!controller.hasPendingRequest, "Closing the owner must cancel its pending request immediately")
         activeWindow.window = b
         controller.show([unknown])
         try await waitUntil { !controller.hasPendingRequest }
-        precondition(controller.numberOfPreviewItems(in: nil) == 1)
-        precondition((controller.previewPanel(nil, previewItemAt: 0) as? NSURL)?.path == unknown.path,
+        check(controller.numberOfPreviewItems(in: nil) == 1)
+        check((controller.previewPanel(nil, previewItemAt: 0) as? NSURL)?.path == unknown.path,
                      "A closed owner's stale request must not replace B's file")
-        precondition(b.nextResponder === controller)
+        check(b.nextResponder === controller)
 
         // Reattach A while B owns the panel; its independent close must leave B's preview alone.
         controller.registerOwnerWindow(a)
         a.orderFront(nil)
         a.close()
-        precondition(controller.numberOfPreviewItems(in: nil) == 1)
-        precondition(b.nextResponder === controller)
-        precondition(QLPreviewPanel.shared()?.isVisible == true)
+        check(controller.numberOfPreviewItems(in: nil) == 1)
+        check(b.nextResponder === controller)
+        check(QLPreviewPanel.shared()?.isVisible == true)
         b.close()
-        precondition(controller.numberOfPreviewItems(in: nil) == 0)
-        precondition(b.nextResponder === originalB)
+        check(controller.numberOfPreviewItems(in: nil) == 0)
+        check(b.nextResponder === originalB)
         try await waitUntil { QLPreviewPanel.shared()?.isVisible == false }
     }
 
@@ -230,16 +239,16 @@ import Combine
         let c = ThumbnailCache.Key(file: second, pixels: 3)
         cache.insert(image, for: a, cost: 4)
         cache.insert(image, for: b, cost: 4)
-        precondition(cache.image(for: a) != nil)
+        check(cache.image(for: a) != nil)
         cache.insert(image, for: c, cost: 4)
-        precondition(cache.count == 2 && cache.cost == 8)
-        precondition(cache.image(for: b) == nil, "Least recently used entry must be evicted")
+        check(cache.count == 2 && cache.cost == 8)
+        check(cache.image(for: b) == nil, "Least recently used entry must be evicted")
         cache.insert(image, for: a, cost: 12)
-        precondition(cache.count == 1 && cache.cost == 12)
+        check(cache.count == 1 && cache.cost == 12)
         cache.insert(image, for: c, cost: 13)
-        precondition(cache.count == 1 && cache.cost == 12)
+        check(cache.count == 1 && cache.cost == 12)
         cache.removeAll()
-        precondition(cache.count == 0 && cache.cost == 0)
+        check(cache.count == 0 && cache.cost == 0)
     }
 
     @MainActor private static func selectionTests(_ image: FileRecord, _ unknown: FileRecord) {
@@ -258,15 +267,15 @@ import Combine
         collection.allowsMultipleSelection = true
         coordinator.collection = collection
         coordinator.reload(grid)
-        precondition(coordinator.selection() == [image, unknown])
+        check(coordinator.selection() == [image, unknown])
         var next = grid
         next.rows = [unknown, image]
         coordinator.reload(next)
-        precondition(coordinator.selection() == [unknown, image])
+        check(coordinator.selection() == [unknown, image])
         next.rows = [record(URL(fileURLWithPath: image.path + ".replacement"), id: image.id)]
         coordinator.reload(next)
-        precondition(coordinator.selection().isEmpty, "Reused index ID must not select another path")
-        precondition(selected.isEmpty, "Programmatic reload must not report a user selection")
+        check(coordinator.selection().isEmpty, "Reused index ID must not select another path")
+        check(selected.isEmpty, "Programmatic reload must not report a user selection")
         coordinator.stop()
 
         let table = NSTableView()
@@ -276,11 +285,11 @@ import Combine
         table.delegate = tableCoordinator
         tableCoordinator.table = table
         tableCoordinator.reload(parent)
-        precondition(tableCoordinator.selectedRecords() == [image])
+        check(tableCoordinator.selectedRecords() == [image])
         var replacement = parent
         replacement.rows = next.rows
         tableCoordinator.reload(replacement)
-        precondition(tableCoordinator.selectedRecords().isEmpty)
+        check(tableCoordinator.selectedRecords().isEmpty)
     }
 
     @MainActor private static func waitUntil(_ predicate: () -> Bool) async throws {
@@ -288,7 +297,7 @@ import Combine
             if predicate() { return }
             try await Task.sleep(for: .milliseconds(5))
         }
-        preconditionFailure("Asynchronous native request scheduling did not settle")
+        fail("Asynchronous native request scheduling did not settle")
     }
 
     @MainActor private static func scheduledCancellationTests(_ image: FileRecord) async throws {
@@ -296,17 +305,17 @@ import Combine
         let service = ThumbnailService(concurrencyLimit: 1, generator: generator)
         let tasks = (0..<6).map { size in Task { await service.image(for: image, size: CGFloat(300 + size)) } }
         try await waitUntil { service.activeCount == 1 && service.queuedCount == 5 }
-        precondition(generator.requests.count == 1, "Bounded scheduling must not start queued native requests")
+        check(generator.requests.count == 1, "Bounded scheduling must not start queued native requests")
         let first = generator.requests[0]
         let lateCompletion = generator.completions[ObjectIdentifier(first)]!
         for task in tasks { task.cancel() }
         for task in tasks { check(await task.value == nil) }
-        precondition(service.activeCount == 0 && service.queuedCount == 0)
-        precondition(!generator.cancelled.isEmpty, "In-flight Quick Look requests must be cancelled")
+        check(service.activeCount == 0 && service.queuedCount == 0)
+        check(!generator.cancelled.isEmpty, "In-flight Quick Look requests must be cancelled")
         let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: image.path) as CFURL, nil)!
         lateCompletion(CGImageSourceCreateImageAtIndex(source, 0, nil)!)
         await Task.yield()
-        precondition(service.cache.count == 0, "A late cancelled callback must not enter the cache")
+        check(service.cache.count == 0, "A late cancelled callback must not enter the cache")
     }
 
     @MainActor private static func viewportTests(_ directory: URL, _ source: URL) async throws {
@@ -339,7 +348,7 @@ import Combine
         coordinator.reload(parent)
         collection.layoutSubtreeIfNeeded()
         coordinator.refreshVisible()
-        precondition(coordinator.loadingCount == 0, "Hidden results must not request thumbnails")
+        check(coordinator.loadingCount == 0, "Hidden results must not request thumbnails")
         window.orderFront(nil)
         collection.layoutSubtreeIfNeeded()
         coordinator.refreshVisible()
@@ -347,9 +356,9 @@ import Combine
         let initial = collection.indexPathsForVisibleItems().filter {
             collection.item(at: $0)?.view.frame.intersects(collection.visibleRect) == true
         }
-        precondition(coordinator.loadingCount == initial.count)
-        precondition(initial.count > 0 && initial.count < rows.count)
-        precondition(service.activeCount + service.queuedCount <= initial.count,
+        check(coordinator.loadingCount == initial.count)
+        check(initial.count > 0 && initial.count < rows.count)
+        check(service.activeCount + service.queuedCount <= initial.count,
                      "Offscreen records must not be submitted to the generator")
         let staleCompletion = generator.completions[ObjectIdentifier(generator.requests[0])]!
         var replacement = parent
@@ -359,8 +368,8 @@ import Combine
         let sourceImage = CGImageSourceCreateWithURL(source as CFURL, nil)!
         staleCompletion(CGImageSourceCreateImageAtIndex(sourceImage, 0, nil)!)
         await Task.yield()
-        precondition(coordinator.loadingCount == 0 && coordinator.selection().isEmpty)
-        precondition(service.cache.count == 0)
+        check(coordinator.loadingCount == 0 && coordinator.selection().isEmpty)
+        check(service.cache.count == 0)
         coordinator.stop()
         window.close()
     }
