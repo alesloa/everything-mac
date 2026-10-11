@@ -184,25 +184,45 @@ struct CatalogDescriptor: Identifiable {
         operationTask = Task { [weak self] in
             do {
                 let restored = try await Task.detached(priority: .utility) {
+                    if cancellation.isCancelled { throw CancellationError() }
                     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                     let urls = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
                     var snapshots: [FileCatalogSnapshot] = []
+                    var failures: [String] = []
                     for url in urls where url.pathExtension == "efcatalog" {
-                        snapshots.append(try CatalogIO.load(from: url, isCancelled: { cancellation.isCancelled }))
+                        if cancellation.isCancelled { throw CancellationError() }
+                        do {
+                            snapshots.append(try CatalogIO.load(from: url, isCancelled: { cancellation.isCancelled }))
+                        } catch {
+                            if error is CancellationError || cancellation.isCancelled { throw CancellationError() }
+                            // Source: the saved file's actual path and its parser/filesystem error.
+                            failures.append("\(url.path): \(error.localizedDescription)")
+                        }
                     }
                     let mappingURL = directory.appendingPathComponent("mappings.json")
-                    let mappings = FileManager.default.fileExists(atPath: mappingURL.path)
-                        ? try JSONDecoder().decode([UUID: CatalogPathMapping].self, from: Data(contentsOf: mappingURL)) : [:]
-                    return (snapshots, mappings)
+                    var mappings: [UUID: CatalogPathMapping] = [:]
+                    if FileManager.default.fileExists(atPath: mappingURL.path) {
+                        do {
+                            mappings = try JSONDecoder().decode([UUID: CatalogPathMapping].self, from: Data(contentsOf: mappingURL))
+                        } catch {
+                            if error is CancellationError || cancellation.isCancelled { throw CancellationError() }
+                            failures.append("\(mappingURL.path): \(error.localizedDescription)")
+                        }
+                    }
+                    if cancellation.isCancelled { throw CancellationError() }
+                    return (snapshots, mappings, failures)
                 }.value
                 guard let self else { return }
+                if cancellation.isCancelled { throw CancellationError() }
                 for snapshot in restored.0 {
                     snapshots[snapshot.id] = snapshot
                     if !catalogs.contains(where: { $0.id == snapshot.id }) {
                         catalogs.append(CatalogDescriptor(id: snapshot.id, name: snapshot.sourceName, count: snapshot.count))
                     }
                 }
-                mappings = restored.1; isWorking = false; search()
+                mappings = restored.1
+                errorMessage = restored.2.isEmpty ? nil : restored.2.joined(separator: "\n")
+                isWorking = false; search()
             } catch { self?.finishOperation(error) }
         }
     }

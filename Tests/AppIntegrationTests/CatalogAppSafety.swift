@@ -49,7 +49,44 @@ import IndexCore
         reopened.removeCatalog(catalog.record.id.catalog); try await settle(reopened)
         precondition(reopened.catalogs.isEmpty && reopened.rows.isEmpty && index.count == 1,
                      "Removing an imported catalog must not mutate the native index")
-        print("PASS: catalog scope, native identity isolation, uncapped exports, mapping persistence and independent removal")
+
+        let isolatedDirectory = directory.appendingPathComponent("isolated-restore")
+        try FileManager.default.createDirectory(at: isolatedDirectory, withIntermediateDirectories: false)
+        let validURL = isolatedDirectory.appendingPathComponent("valid.efcatalog")
+        let validSnapshot = try CatalogIO.importFile(from: source, to: validURL)
+        let corruptURL = isolatedDirectory.appendingPathComponent("corrupt.efcatalog")
+        let corruptBytes = Data("broken catalog".utf8)
+        try corruptBytes.write(to: corruptURL, options: .withoutOverwriting)
+        let mappingURL = isolatedDirectory.appendingPathComponent("mappings.json")
+        let mappingBytes = Data("{broken mappings".utf8)
+        try mappingBytes.write(to: mappingURL, options: .withoutOverwriting)
+        let isolated = CatalogStore(directory: isolatedDirectory)
+        try await settle(isolated)
+        precondition(isolated.catalogs.count == 1 && isolated.catalogs[0].id == validSnapshot.id)
+        precondition(isolated.rows.count == 1 && isolated.rows[0].record.path == "C:\\Archive\\catalog-file.txt",
+                     "Valid catalogs must remain searchable when another catalog or mappings file is corrupt")
+        precondition(isolated.mappings.isEmpty, "Failed mapping settings must not invent a mapping")
+        let restoreError = try isolated.errorMessage.unwrap()
+        precondition(restoreError.contains(corruptURL.path) && restoreError.contains(mappingURL.path),
+                     "Restore errors must identify every offending saved file")
+        do { _ = try CatalogIO.load(from: corruptURL); preconditionFailure("Corrupt catalog unexpectedly loaded") }
+        catch { precondition(restoreError.contains(error.localizedDescription)) }
+        do {
+            _ = try JSONDecoder().decode([UUID: CatalogPathMapping].self, from: mappingBytes)
+            preconditionFailure("Corrupt mappings unexpectedly decoded")
+        } catch { precondition(restoreError.contains(error.localizedDescription)) }
+        let savedCorruptBytes = try Data(contentsOf: corruptURL), savedMappingBytes = try Data(contentsOf: mappingURL)
+        let retainedValid = try CatalogIO.load(from: validURL)
+        precondition(savedCorruptBytes == corruptBytes && savedMappingBytes == mappingBytes,
+                     "Restore must preserve corrupt owner files for recovery")
+        precondition(retainedValid.count == 1)
+        let cancelledRestore = CatalogStore(directory: isolatedDirectory)
+        cancelledRestore.cancelWork()
+        try await settle(cancelledRestore)
+        precondition(cancelledRestore.catalogs.isEmpty && cancelledRestore.rows.isEmpty && cancelledRestore.mappings.isEmpty,
+                     "Cancelled restore must not publish a partially loaded catalog collection")
+        precondition(cancelledRestore.errorMessage == nil, "Cancellation must remain cancellation")
+        print("PASS: catalog scope, native identity isolation, uncapped exports, mapping persistence, independent removal and corrupt restore isolation")
     }
 }
 
