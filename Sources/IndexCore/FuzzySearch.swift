@@ -58,6 +58,9 @@ extension QueryEngine {
     func matches(_ query: Query, in store: FileStore, candidates: [UInt32]? = nil,
                  nameIndex: UniqueNameIndex?,
                  isCancelled: @escaping @Sendable () -> Bool = { false }) -> [SearchMatch] {
+        if query.usesAdvancedEngine {
+            return advancedMatches(query, in: store, candidates: candidates, isCancelled: isCancelled)
+        }
         guard query.hasFuzzyTerms else {
             return search(query, in: store, candidates: candidates, nameIndex: nameIndex,
                           isCancelled: isCancelled).map { SearchMatch(id: $0, score: 0) }
