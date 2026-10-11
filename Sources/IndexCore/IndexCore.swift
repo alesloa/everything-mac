@@ -1,3 +1,4 @@
 public enum IndexCore {
-    public static let version = "0.1.0"
+    // Source: the application version in App/project.yml.
+    public static let version = "0.5.0"
 }

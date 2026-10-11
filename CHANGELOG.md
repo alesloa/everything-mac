@@ -4,6 +4,22 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [0.5.0] - Unreleased
+
+### Added
+- Advanced query operators, regular expressions, metadata predicates, built-in file-type filters, and a visual query builder.
+- Scheduled network-share refresh with per-share pause, cancel, manual refresh, and observed progress.
+- Multi-file actions, file clipboard and drag-and-drop, copy/move destinations, single and batch rename, Finder Get Info, and guarded undo.
+- Quick Look, a preview pane, and visible-result thumbnails with bounded background work.
+- Saved searches, reusable query macros and filters, history, independent search tabs and windows, and session restoration.
+- A menu bar item, a configurable global shortcut, and indexing after the last window closes.
+- Exact query counts, match highlighting, persisted table columns, an indexed folder sidebar, and optional indexed folder totals.
+- Portable file catalogs and selected, shown, or full-query exports in CSV, JSON, EFU, TXT, and TSV formats.
+- Verified duplicate-file groups and folder comparison using streamed SHA-256 checks, without automatic deletion.
+- Optional scoped content search for supported text, source, raw HTML, and PDF text, with cancellation and file-size limits.
+- A read-only `everything` command-line tool using the saved index and shared query/export behavior. See [COMMAND_LINE.md](COMMAND_LINE.md).
+- An index activity viewer with bounded observed events and actual scan, cache, and network status.
+
 ## [0.4.0] - Unreleased
 
 ### Added
@@ -74,6 +90,8 @@ All notable changes to EverythingMac are recorded here. The format is based on
 ### Added
 - First public release. Instant filename and folder search across every mounted volume, updating as you type. FSEvents-backed live index, a binary on-disk cache for instant restarts, and right-click actions (Open, Open With, Reveal in Finder, Copy Path/Name, Move to Trash).
 
+[0.5.0]: https://github.com/alesloa/everything-mac/compare/v0.3.0...main
+[0.4.0]: https://github.com/alesloa/everything-mac/compare/v0.3.0...main
 [0.3.0]: https://github.com/alesloa/everything-mac/releases/tag/v0.3.0
 [0.2.2]: https://github.com/alesloa/everything-mac/releases/tag/v0.2.2
 [0.2.1]: https://github.com/alesloa/everything-mac/releases/tag/v0.2.1

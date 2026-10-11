@@ -103,6 +103,11 @@ struct ContentView: View {
                 DuplicateFinderView(index: model.index.searchIndex,
                     query: try? model.featureQueryResult.get(), selectedPaths: model.actionRecords.map(\.path),
                     folderPath: model.folderScope?.path)
+            case .contentSearch:
+                if case .failure(let error) = model.featureQueryResult { featureError(error) }
+                ContentSearchView(index: model.index.searchIndex,
+                    query: try? model.featureQueryResult.get(), selectedPaths: model.actionRecords.map(\.path),
+                    folderPath: model.folderScope?.path)
             default: EmptyView()
             }
         }
