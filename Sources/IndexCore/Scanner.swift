@@ -21,14 +21,15 @@ public struct Scanner: Sendable {
     static func openDirectory(_ path: String, relativeTo root: String? = nil) -> UnsafeMutablePointer<DIR>? {
         let options = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
         var fd: Int32
-        if let root, path != root {
+        if let root, !path.utf8.elementsEqual(root.utf8) {
             let prefix = root == "/" ? "/" : root + "/"
-            guard path.hasPrefix(prefix) else { errno = EINVAL; return nil }
+            guard path.utf8.starts(with: prefix.utf8) else { errno = EINVAL; return nil }
             fd = open(root, options)
             guard fd >= 0 else { return nil }
-            for component in path.dropFirst(prefix.count).split(separator: "/") {
+            for bytes in path.utf8.dropFirst(prefix.utf8.count).split(separator: UInt8(47)) {
+                let component = String(decoding: bytes, as: UTF8.self)
                 guard component != ".", component != ".." else { close(fd); errno = EINVAL; return nil }
-                let next = openat(fd, String(component), options)
+                let next = openat(fd, component, options)
                 let failure = errno
                 close(fd)
                 guard next >= 0 else { errno = failure; return nil }
