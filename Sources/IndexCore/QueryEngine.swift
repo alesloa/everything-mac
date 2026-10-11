@@ -9,15 +9,17 @@ public struct QueryEngine: Sendable {
         case string(String)   // original term, for non-ASCII or case-sensitive fallback
     }
 
-    // Returns matching record ids in ascending id order. All terms must match (AND).
+    // Full scans return matching ids in ascending order; restricted scans retain
+    // candidate order. All terms must match (AND).
     // The substring/glob scan is the hot path; "Match whole word" is layered on top as
     // a cheap refinement pass over the already-narrowed result set, so the inner scan
     // loops stay exactly as fast as before and pay nothing when the option is off.
     public func search(_ query: Query, in store: FileStore,
+                       candidates: [UInt32]? = nil,
                        isCancelled: @escaping @Sendable () -> Bool = { false }) -> [UInt32] {
         if isCancelled() { return [] }
-        if query.hasFuzzyTerms { return matches(query, in: store, isCancelled: isCancelled).map(\.id) }
-        let ids = rawSearch(query, in: store, isCancelled: isCancelled)
+        if query.hasFuzzyTerms { return matches(query, in: store, candidates: candidates, isCancelled: isCancelled).map(\.id) }
+        let ids = rawSearch(query, in: store, candidates: candidates, isCancelled: isCancelled)
         guard query.wholeWord else { return ids }
         return ids.filter { !isCancelled() && wholeWordMatch(query, id: $0, in: store) }
     }
@@ -37,14 +39,24 @@ public struct QueryEngine: Sendable {
     // of millions of records is the floor for substring search, so parallelizing it
     // is what keeps typing instant.
     private func rawSearch(_ query: Query, in store: FileStore,
+                           candidates: [UInt32]?,
                            isCancelled: @escaping @Sendable () -> Bool) -> [UInt32] {
         let terms = query.terms
-        let n = store.count
+        let n = candidates?.count ?? store.count
         // Empty query = every record. With no tombstones the id range IS the answer
         // (instant). With deletions, one reserved single-threaded pass dropping dead
         // ids — faster than the chunked scan here, whose per-chunk arrays + flatMap
         // merge cost more than the scan for an all-match result.
         if terms.isEmpty {
+            if let candidates {
+                var out: [UInt32] = []
+                out.reserveCapacity(candidates.count)
+                for (i, id) in candidates.enumerated() {
+                    if i & 1023 == 0 && isCancelled() { return [] }
+                    if Int(id) < store.count && store.isLive(id) { out.append(id) }
+                }
+                return isCancelled() ? [] : out
+            }
             if !store.hasDeletions { return Array(0..<UInt32(n)) }
             var out = [UInt32](); out.reserveCapacity(n)
             var id: UInt32 = 0
@@ -66,6 +78,10 @@ public struct QueryEngine: Sendable {
 
         // Serial below this threshold — thread fan-out isn't worth it for small stores.
         if n < 100_000 {
+            if let candidates {
+                return scanCandidates(candidates[...], matchers: matchers, matchPath: matchPath,
+                                      ci: ci, in: store, isCancelled: isCancelled)
+            }
             return scanRange(0, UInt32(n), matchers: matchers, matchPath: matchPath,
                              hasNonASCII: hasNonASCII, ci: ci, in: store, isCancelled: isCancelled)
         }
@@ -81,11 +97,52 @@ public struct QueryEngine: Sendable {
             let lo = c * span
             let hi = min(n, lo + span)
             guard lo < hi else { return }
+            if let candidates {
+                parts.set(self.scanCandidates(candidates[lo..<hi], matchers: matchers,
+                                              matchPath: matchPath, ci: ci, in: store,
+                                              isCancelled: isCancelled), at: c)
+                return
+            }
             parts.set(self.scanRange(UInt32(lo), UInt32(hi), matchers: matchers,
                                     matchPath: matchPath, hasNonASCII: hasNonASCII, ci: ci,
                                     in: store, isCancelled: isCancelled), at: c)
         }
         return isCancelled() ? [] : parts.joined()
+    }
+
+    // Candidate IDs retain their original scan order. Borrow the arena for the
+    // whole chunk, just as the full scan does; no per-name buffer allocation.
+    private func scanCandidates(_ ids: ArraySlice<UInt32>, matchers: [TermMatcher],
+                                matchPath: Bool, ci: Bool, in store: FileStore,
+                                isCancelled: @Sendable () -> Bool) -> [UInt32] {
+        store.withNameArena { arena in
+            var out: [UInt32] = []
+            for (i, id) in ids.enumerated() {
+                if i & 1023 == 0 && isCancelled() { return [] }
+                guard Int(id) < store.count, store.isLive(id) else { continue }
+                var string = matchPath ? store.path(of: id) : nil
+                func matches(_ bytes: UnsafeBufferPointer<UInt8>) -> Bool {
+                    for matcher in matchers {
+                        switch matcher {
+                        case .ascii(let pattern):
+                            guard Glob.matchesASCII(patternLowerBytes: pattern, in: bytes) else { return false }
+                        case .string(let term):
+                            if string == nil { string = store.name(of: id) }
+                            guard Glob.matches(pattern: term, in: string!, caseInsensitive: ci) else { return false }
+                        }
+                    }
+                    return true
+                }
+                let matched: Bool
+                if let path = string {
+                    matched = Array(path.utf8).withUnsafeBufferPointer { matches($0) }
+                } else {
+                    matched = matches(arena.bytes(in: store.nameRange(of: id)))
+                }
+                if matched { out.append(id) }
+            }
+            return isCancelled() ? [] : out
+        }
     }
 
     // Scan ids in [lo, hi) and return those matching every term. The match logic is
@@ -95,71 +152,80 @@ public struct QueryEngine: Sendable {
     private func scanRange(_ lo: UInt32, _ hi: UInt32, matchers: [TermMatcher],
                            matchPath: Bool, hasNonASCII: Bool, ci: Bool, in store: FileStore,
                            isCancelled: @Sendable () -> Bool) -> [UInt32] {
-        var out: [UInt32] = []
-        out.reserveCapacity(Int(hi - lo) / 64 + 16)
+        store.withNameArena { arena in
+            var out: [UInt32] = []
+            out.reserveCapacity(Int(hi - lo) / 64 + 16)
 
-        // Whether any record is tombstoned. If not, skip the per-id live check
-        // entirely (the common case — keeps the hot all-ASCII loop branch-free).
-        let checkLive = store.hasDeletions
+            // Whether any record is tombstoned. If not, skip the per-id live check
+            // entirely (the common case — keeps the hot all-ASCII loop branch-free).
+            let checkLive = store.hasDeletions
 
-        if matchPath {
-            var id = lo
-            while id < hi {
-                if id & 1023 == 0 && isCancelled() { return [] }
-                if checkLive && !store.isLive(id) { id &+= 1; continue }
-                let pathStr = store.path(of: id)
-                var all = true
-                for m in matchers {
-                    switch m {
-                    case .ascii(let pat):
-                        if !Glob.matchesASCII(patternLowerBytes: pat, in: Array(pathStr.utf8)[...]) { all = false }
-                    case .string(let term):
-                        if !Glob.matches(pattern: term, in: pathStr, caseInsensitive: ci) { all = false }
+            if matchPath {
+                var id = lo
+                while id < hi {
+                    if id & 1023 == 0 && isCancelled() { return [] }
+                    if checkLive && !store.isLive(id) { id &+= 1; continue }
+                    let pathStr = store.path(of: id)
+                    var all = true
+                    for m in matchers {
+                        switch m {
+                        case .ascii(let pat):
+                            if !Glob.matchesASCII(patternLowerBytes: pat, in: Array(pathStr.utf8)[...]) { all = false }
+                        case .string(let term):
+                            if !Glob.matches(pattern: term, in: pathStr, caseInsensitive: ci) { all = false }
+                        }
+                        if !all { break }
                     }
-                    if !all { break }
+                    if all { out.append(id) }
+                    id &+= 1
                 }
-                if all { out.append(id) }
-                id &+= 1
-            }
-        } else if hasNonASCII {
-            var id = lo
-            while id < hi {
-                if id & 1023 == 0 && isCancelled() { return [] }
-                if checkLive && !store.isLive(id) { id &+= 1; continue }
-                let nameSlice = store.nameBytesSlice(of: id)
-                var all = true
-                var nameStr: String? = nil
-                for m in matchers {
-                    switch m {
-                    case .ascii(let pat):
-                        if !Glob.matchesASCII(patternLowerBytes: pat, in: nameSlice) { all = false }
-                    case .string(let term):
-                        if nameStr == nil { nameStr = store.name(of: id) }
-                        if !Glob.matches(pattern: term, in: nameStr!, caseInsensitive: ci) { all = false }
+            } else if hasNonASCII {
+                var id = lo
+                while id < hi {
+                    if id & 1023 == 0 && isCancelled() { return [] }
+                    if checkLive && !store.isLive(id) { id &+= 1; continue }
+                    let nameSlice = arena.bytes(in: store.nameRange(of: id))
+                    var all = true
+                    var nameStr: String? = nil
+                    for m in matchers {
+                        switch m {
+                        case .ascii(let pat):
+                            if !Glob.matchesASCII(patternLowerBytes: pat, in: nameSlice) { all = false }
+                        case .string(let term):
+                            if nameStr == nil { nameStr = store.name(of: id) }
+                            if !Glob.matches(pattern: term, in: nameStr!, caseInsensitive: ci) { all = false }
+                        }
+                        if !all { break }
                     }
-                    if !all { break }
+                    if all { out.append(id) }
+                    id &+= 1
                 }
-                if all { out.append(id) }
-                id &+= 1
-            }
-        } else {
-            // Common case: all terms ASCII — zero String allocation per record.
-            var id = lo
-            while id < hi {
-                if id & 1023 == 0 && isCancelled() { return [] }
-                if checkLive && !store.isLive(id) { id &+= 1; continue }
-                let nameSlice = store.nameBytesSlice(of: id)
-                var all = true
-                for m in matchers {
-                    if case .ascii(let pat) = m, !Glob.matchesASCII(patternLowerBytes: pat, in: nameSlice) {
-                        all = false; break
+            } else {
+                // Common case: all terms ASCII — zero String allocation per record.
+                var id = lo
+                while id < hi {
+                    if id & 1023 == 0 && isCancelled() { return [] }
+                    if checkLive && !store.isLive(id) { id &+= 1; continue }
+                    let nameSlice = arena.bytes(in: store.nameRange(of: id))
+                    var all = true
+                    for m in matchers {
+                        if case .ascii(let pat) = m, !Glob.matchesASCII(patternLowerBytes: pat, in: nameSlice) {
+                            all = false; break
+                        }
                     }
+                    if all { out.append(id) }
+                    id &+= 1
                 }
-                if all { out.append(id) }
-                id &+= 1
             }
+            return out
         }
-        return out
+    }
+}
+
+// Borrow a name's byte range without creating a reference-counted ArraySlice.
+private extension UnsafeBufferPointer where Element == UInt8 {
+    func bytes(in range: Range<Int>) -> UnsafeBufferPointer<UInt8> {
+        UnsafeBufferPointer(start: baseAddress?.advanced(by: range.lowerBound), count: range.count)
     }
 }
 
