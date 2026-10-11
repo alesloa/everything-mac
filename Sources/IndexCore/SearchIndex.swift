@@ -25,6 +25,10 @@ public final class SearchIndex: @unchecked Sendable {
         return snapshot.store.count - snapshot.store.deletedCount
     }
 
+    /// Capture the immutable published value for background streaming exports.
+    /// Copy-on-write storage keeps later live updates out of this snapshot.
+    public func readSnapshot() -> FileStore { lock.withLock { current.store } }
+
     public func path(of id: UInt32) -> String? {
         let snapshot = lock.withLock { current }
         guard Int(id) < snapshot.store.count, snapshot.store.isLive(id) else { return nil }
