@@ -65,9 +65,10 @@ swift test -c release
 ```
 
 The native app checks exercise selection and context-menu targets through live
-refreshes, overlapping rebuild cancellation, quoted TSV export, and preservation
-of known network files after incomplete scans. They use temporary fixtures and
-inspect action targets without opening or deleting files.
+refreshes, overlapping rebuild cancellation, file operations and guarded undo,
+quoted TSV export, and preservation of known network files after incomplete
+scans. They use temporary fixtures and inspect launch targets without opening
+owner files.
 
 The regressions in [`StartupSafetyTests.swift`](Tests/IndexCoreTests/StartupSafetyTests.swift)
 and [`TableSafety.swift`](Tests/AppIntegrationTests/TableSafety.swift) exercise watcher

@@ -20,6 +20,11 @@ All notable changes to EverythingMac are recorded here. The format is based on
 - A read-only `everything` command-line tool using the saved index and shared query/export behavior. See [COMMAND_LINE.md](COMMAND_LINE.md).
 - An index activity viewer with bounded observed events and actual scan, cache, and network status.
 
+### Fixed
+- Undo retains edited copies even when an in-place edit preserves the original byte count and restores the exact modification time.
+- Switching search tabs clears the previous tab's match count and validation error until the new search completes.
+- The content-search panel requires a valid filename query before offering scope controls.
+
 ## [0.4.0] - Unreleased
 
 ### Added
