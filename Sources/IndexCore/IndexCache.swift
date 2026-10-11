@@ -2,7 +2,12 @@ import Foundation
 import Darwin
 
 public enum IndexCache {
-    struct CacheError: Error {}
+    struct CacheError: Error, LocalizedError {
+        let message: String
+        // Source: a failing cache operation; specific load guards supply detail.
+        init(_ message: String = "The index cache operation failed.") { self.message = message }
+        var errorDescription: String? { message }
+    }
     // [EMC2][event checkpoint][rules fingerprint][EMS1/EMS2 column blob].
     // Cache replacement is atomic: readers retain their old mapping's inode.
     private static let magic = Array("EMC2".utf8)
@@ -35,13 +40,19 @@ public enum IndexCache {
     public static func load(from url: URL) throws -> (FileStore, UInt64, UInt64) {
         try load(from: url, buildWriterIndex: true)
     }
-    static func load(from url: URL, buildWriterIndex: Bool) throws -> (FileStore, UInt64, UInt64) {
+    /// Read-only clients can omit the app writer's derived children index.
+    public static func load(from url: URL, buildWriterIndex: Bool) throws -> (FileStore, UInt64, UInt64) {
         let bytes = try StoreBytes(file: url)
         let header = magic.count + 16
-        guard bytes.count >= header, Array(bytes.buffer(in: 0..<magic.count)) == magic else { throw CacheError() }
+        // These diagnostics report the actual binary-header/schema checks below.
+        guard bytes.count >= header, Array(bytes.buffer(in: 0..<magic.count)) == magic else {
+            throw CacheError("The saved index header is invalid.")
+        }
         let event = bytes.value(at: magic.count, as: UInt64.self)
         let fingerprint = bytes.value(at: magic.count + 8, as: UInt64.self)
-        guard let store = FileStore(storage: bytes, offset: header, buildWriterIndex: buildWriterIndex) else { throw CacheError() }
+        guard let store = FileStore(storage: bytes, offset: header, buildWriterIndex: buildWriterIndex) else {
+            throw CacheError("The saved index data is invalid.")
+        }
         return (store, event, fingerprint)
     }
 }
