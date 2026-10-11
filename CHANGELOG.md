@@ -4,6 +4,14 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [0.5.2] - 2026-10-11
+
+### Fixed
+- The startup drive can be turned off in Settings > Volumes while enabled external drives and selected network shares remain searchable.
+- Startup-drive choices persist and invalidate the appropriate index cache; toggling the startup drive retains cached files from offline network shares.
+- Closing the folder sidebar clears its location restriction and returns the tab to all indexed folders, retaining the query, filters, and sorting.
+- Restored folder searches show the sidebar, and a close button explains how to return to all indexed folders.
+
 ## [0.5.1] - 2026-10-11
 
 ### Fixed
@@ -104,6 +112,7 @@ All notable changes to EverythingMac are recorded here. The format is based on
 ### Added
 - First public release. Instant filename and folder search across every mounted volume, updating as you type. FSEvents-backed live index, a binary on-disk cache for instant restarts, and right-click actions (Open, Open With, Reveal in Finder, Copy Path/Name, Move to Trash).
 
+[0.5.2]: https://github.com/alesloa/everything-mac/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/alesloa/everything-mac/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/alesloa/everything-mac/compare/v0.3.0...v0.5.0
 [0.3.0]: https://github.com/alesloa/everything-mac/releases/tag/v0.3.0

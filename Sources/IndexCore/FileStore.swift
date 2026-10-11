@@ -20,6 +20,7 @@ public struct FileStore: Sendable {
     // rather than copying every base record's live flag after each publication.
     private var deletedWords: [Int: UInt64] = [:]
     private var childrenByParent: [UInt32: [UInt32]] = [:]
+    private var additionalRoots: [UInt32] = []
     private var dirReconcileMtime: [UInt32: Int64] = [:]
     private var incompleteSubtrees: Set<UInt32> = []
     public private(set) var rootID: UInt32 = .max
@@ -67,7 +68,10 @@ public struct FileStore: Sendable {
         nameMasks.append(FuzzyMatcher.mask(bytes))
         parents.append(parent); sizes.append(size); mtimes.append(mtime)
         flags.append(isDir ? 1 : 0); volIDs.append(volID)
-        if parent == Self.noParent { rootID = id }
+        if parent == Self.noParent {
+            if rootID == Self.noParent { rootID = id }
+            else if isDir { additionalRoots.append(id) }
+        }
         else { childrenByParent[parent, default: []].append(id) }
         revision &+= 1
         return id
@@ -157,6 +161,7 @@ public struct FileStore: Sendable {
     public mutating func markDeleted(_ id: UInt32) {
         incompleteSubtrees.remove(id)
         if isLive(id) {
+            if parent(of: id) == Self.noParent { additionalRoots.removeAll { $0 == id } }
                 let i = Int(id)
             deletedWords[i >> 6, default: 0] |= UInt64(1) << (i & 63)
             deletedCount += 1; revision &+= 1
@@ -184,14 +189,16 @@ public struct FileStore: Sendable {
     }
 
     /// Graft a separately scanned tree under `parent`. The subtree's root becomes a
-    /// new child of `parent` named by the last component of its root path; every
+    /// new child of `parent` named by the last component of its root path; passing
+    /// noParent retains its full path as an independent directory root. Every
     /// other record is copied with remapped parent ids and tagged `volID`. Requires
     /// the subtree's records to be in parent-before-child order, which both scanners
     /// guarantee. Returns the id of the grafted root.
     @discardableResult
     public mutating func merge(_ sub: FileStore, asChildOf parent: UInt32, volID: UInt32) -> UInt32? {
         guard sub.rootID != Self.noParent else { return nil }
-        let rootName = (sub.name(of: sub.rootID) as NSString).lastPathComponent
+        let rootName = parent == Self.noParent ? sub.name(of: sub.rootID)
+            : (sub.name(of: sub.rootID) as NSString).lastPathComponent
         var idMap = [UInt32](repeating: Self.noParent, count: sub.count)
         var newRoot: UInt32?
         for i in 0..<sub.count {
@@ -204,7 +211,9 @@ public struct FileStore: Sendable {
                 idMap[i] = r; newRoot = r
                 continue
             }
-            let p = idMap[Int(sub.parent(of: id))]
+            let originalParent = sub.parent(of: id)
+            guard originalParent != Self.noParent else { continue }
+            let p = idMap[Int(originalParent)]
             guard p != Self.noParent else { continue }
             idMap[i] = append(name: sub.name(of: id), parent: p, size: sub.size(of: id),
                               mtime: sub.mtime(of: id), isDir: sub.isDir(of: id), volID: volID)
@@ -249,18 +258,30 @@ public struct FileStore: Sendable {
     // node's name is its full path ("/" for the app's whole-disk scan, or a temp
     // base path for a scoped Scanner), so we strip that prefix before walking.
     public func idForDirPath(_ path: String) -> UInt32? {
-        guard rootID != Self.noParent, isLive(rootID), isDir(of: rootID) else { return nil }
-        let rootName = name(of: rootID)
-        if path.utf8.elementsEqual(rootName.utf8) { return rootID }
+        // Explicit network mounts can sit outside the enabled local scan root.
+        // Resolve those independent trees without adding excluded boot folders.
+        if let id = idForDirPath(path, under: rootID) { return id }
+        for root in base?.additionalRoots ?? [] {
+            if let id = idForDirPath(path, under: root) { return id }
+        }
+        for root in additionalRoots {
+            if let id = idForDirPath(path, under: root) { return id }
+        }
+        return nil
+    }
+
+    private func idForDirPath(_ path: String, under root: UInt32) -> UInt32? {
+        guard root != Self.noParent, isLive(root), isDir(of: root) else { return nil }
+        let rootName = name(of: root)
+        if path.utf8.elementsEqual(rootName.utf8) { return root }
         let prefix = rootName == "/" ? "/" : rootName + "/"
         guard path.utf8.starts(with: prefix.utf8) else { return nil }
-        let rest = path.utf8.dropFirst(prefix.utf8.count)
-        var cur = rootID
-        for comp in rest.split(separator: UInt8(47), omittingEmptySubsequences: true) {
-            guard let next = childID(named: String(decoding: comp, as: UTF8.self), under: cur), isDir(of: next) else { return nil }
-            cur = next
+        var current = root
+        for comp in path.utf8.dropFirst(prefix.utf8.count).split(separator: UInt8(47), omittingEmptySubsequences: true) {
+            guard let next = childID(named: String(decoding: comp, as: UTF8.self), under: current), isDir(of: next) else { return nil }
+            current = next
         }
-        return cur
+        return current
     }
 
     // EMS2 retains the EMS1 columns and appends precomputed search masks.
@@ -350,6 +371,7 @@ public struct FileStore: Sendable {
             if keep != 0 { remaining[wordID] = keep }
         }
         deletedWords = remaining
+        additionalRoots.removeAll { Int($0) < compacted.count }
         base = compacted.base
         compactedRevision = expectedRevision
         return true

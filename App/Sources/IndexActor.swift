@@ -35,6 +35,7 @@ actor IndexActor {
     private var compactionID: UUID?
     private var storeGeneration: UInt64 = 0
     private var storeFingerprint: UInt64?
+    private var storeRules: ExcludeRules?
     private var rules = ExcludeRules.defaults
     // Rules the LIVE path reconciles with — the user rules plus the firmlink back-door /
     // network-mount exclusions the scan applies via effectiveRules(). Without these, a
@@ -232,6 +233,7 @@ actor IndexActor {
         // network round-trip per lstat and an smbfs readdir blocks in uninterruptible
         // I/O — a single mounted share with millions of files hangs the whole scan.
         effective.pathPrefixes += firmlinkBackDoors
+        if rules.excludeBootVolume { effective.pathPrefixes += Self.startupVolumeAliases() }
         if excludingNetworkMounts { effective.pathPrefixes += Self.nonLocalMountPaths() }
         return effective
     }
@@ -258,6 +260,20 @@ actor IndexActor {
     // Mount points of non-local filesystems — network shares and automounter stubs.
     static func nonLocalMountPaths() -> [String] { MountTable.nonLocalMounts().map(\.path) }
 
+    // /Volumes exposes the startup disk as a symlink to /. Exclude the alias
+    // itself as well as its contents, without resolving or reading network mounts.
+    static func startupVolumeAliases(in directory: String = "/Volumes", target: String = "/") -> [String] {
+        let manager = FileManager.default
+        let networkPaths = Set(nonLocalMountPaths())
+        return (try? manager.contentsOfDirectory(atPath: directory))?.sorted().compactMap { name in
+            let path = directory + "/" + name
+            guard !networkPaths.contains(path) else { return nil }
+            guard let destination = try? manager.destinationOfSymbolicLink(atPath: path),
+                  destination.utf8.elementsEqual(target.utf8) else { return nil }
+            return path
+        } ?? []
+    }
+
     // Rebuild the whole index from "/". The walk runs OFF the actor on a pool of
     // worker threads (ParallelScanner). Searches keep using the existing snapshot
     // while the replacement builds; publish the finished store atomically.
@@ -278,7 +294,7 @@ actor IndexActor {
         rebuildID = id
         progressiveScanCount = 0
         scanProgressCount = 0
-        activityJournal.startScan(id: id, path: "/")
+        activityJournal.startScan(id: id, path: rules.localScanRoot)
         replayCheckpointBlocked = false
         invalidateShareScans()
         publishShareStatus()
@@ -287,7 +303,11 @@ actor IndexActor {
         let effective = effectiveRules()
         let scanner = diskScanner
         let previous = store.storageSnapshot()
-        let retainedShares = storeFingerprint == fingerprint ? rules.networkShares : []
+        // A startup-disk toggle changes only the local scan root. Keep cached
+        // shares through that rebuild even while the server is disconnected.
+        var previousRules = storeRules
+        previousRules?.excludeBootVolume = rules.excludeBootVolume
+        let retainedShares = storeFingerprint == fingerprint || previousRules == rules ? rules.networkShares : []
         let worker = Task.detached(priority: .userInitiated) {
             var scanned = scanner(effective, { cancellation.isCancelled }, { count in
                 Task { await self.scanProgress(count, scanID: id) }
@@ -329,9 +349,11 @@ actor IndexActor {
         storeGeneration &+= 1
         lastEventID = scanEventID
         storeFingerprint = fingerprint
+        storeRules = rules
         activityJournal.finishScan(id: id, outcome: newStore.scanCompleted ? .scanCompleted : .scanIncomplete,
             detail: newStore.scanCompleted ? nil : "Scanner marked the result incomplete.", count: newStore.count)
         publishStore()
+        if monitor != nil { startMonitor() }
         enqueueChanges([])
         onProgress?(store.count, id)
         shareCounts = [:]
@@ -392,6 +414,7 @@ actor IndexActor {
             store = loaded
             lastEventID = evid
             storeFingerprint = savedFingerprint
+            storeRules = rules
             publishStore()
             for share in rules.networkShares { shareCounts[share.source] = store.liveCount(volID: share.volID) }
             checkNetworkShares()
@@ -624,6 +647,7 @@ actor IndexActor {
     }
 
     private func startMonitor() {
+        monitor?.stop()
         let m = LiveMonitor(onChanged: { [weak self] changes in
             guard let self else { return }
             Task { await self.enqueueChanges(changes) }
@@ -644,7 +668,7 @@ actor IndexActor {
         // rescans every few minutes, which is why new files in the home folder took
         // minutes to appear). Watch the Data volume directly so home-folder changes are
         // instant; enqueueChanges maps the /System/Volumes/Data prefix back to canonical.
-        var paths = ["/", "/System/Volumes/Data"]
+        var paths = rules.excludeBootVolume ? ["/Volumes"] : ["/", "/System/Volumes/Data"]
         // Network shares are skipped (checked BEFORE lstat — stat'ing a network mount
         // point itself can block), matching the scan, which doesn't index them.
         let networkMounts = Set(Self.nonLocalMountPaths())
@@ -652,6 +676,7 @@ actor IndexActor {
             for v in vols.sorted() {
                 let p = "/Volumes/" + v
                 if networkMounts.contains(p) { continue }
+                if liveRules.shouldExclude(name: v, path: p, isHidden: v.hasPrefix(".")) { continue }
                 var st = stat()
                 if lstat(p, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR { paths.append(p) }
             }
@@ -768,7 +793,7 @@ actor IndexActor {
     // level in that case. "/" covers the boot + firmlinked Data volume (Data paths are
     // canonicalized to "/"); "/Volumes/<name>" is an external mount root.
     private static func isVolumeRoot(_ path: String) -> Bool {
-        if path == "/" || path == "/System/Volumes/Data" { return true }
+        if path == "/" || path == "/System/Volumes/Data" || path == "/Volumes" { return true }
         if path.hasPrefix("/Volumes/") { return !path.dropFirst("/Volumes/".count).contains("/") }
         return false
     }
@@ -782,7 +807,7 @@ actor IndexActor {
     // readdir when its contents actually changed. Shallow (one level) on purpose:
     // a deep subtree walk would lstat the entire subtree every tick, which is not free.
     func sweepUserFolders() {
-        guard rebuildID == nil else { return }
+        guard rebuildID == nil, !rules.excludeBootVolume else { return }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let targets = ["Desktop", "Documents", "Downloads"].map { home + "/" + $0 }
         var newlyIndexed = Set<String>()

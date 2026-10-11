@@ -5,6 +5,7 @@ struct FolderSidebarView: View {
     let snapshot: FolderSnapshot?
     let selectedScope: FolderScope?
     let onSelect: (FolderScope?) -> Void
+    let onClose: () -> Void
     @State private var expanded: Set<[UInt8]> = []
 
     // These labels describe the owner's requested indexed-folder search scope.
@@ -13,7 +14,15 @@ struct FolderSidebarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(folderLabel).font(.headline).padding(12)
+            HStack {
+                Text(folderLabel).font(.headline)
+                Spacer()
+                // Source: the owner's requested reset when the sidebar closes.
+                Button(action: onClose) { Image(systemName: "xmark") }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close folder sidebar")
+                    .help("Search all indexed folders and hide the sidebar")
+            }.padding(12)
             Button { onSelect(nil) } label: {
                 Label(allLabel, systemImage: "internaldrive")
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -29,6 +38,9 @@ struct FolderSidebarView: View {
                     }
                 }
             }
+            // Source: AppModel.setFolderSidebarVisible clears the location scope.
+            Text("Closing this sidebar searches all indexed folders.")
+                .font(.caption).foregroundStyle(.secondary).padding(10)
         }
         .frame(minWidth: 180, idealWidth: 230, maxWidth: 320)
     }

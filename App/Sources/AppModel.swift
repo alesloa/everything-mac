@@ -446,8 +446,19 @@ final class AppModel: ObservableObject {
 
     func setFolderScope(_ scope: FolderScope?) {
         folderScope = scope
+        if scope != nil { folderSidebarVisible = true; refreshFolderDetailsIfNeeded() }
         workspaceStateChanged()
         Task { await runSearch() }
+    }
+
+    func setFolderSidebarVisible(_ visible: Bool) {
+        let hadScope = folderScope != nil
+        folderSidebarVisible = visible
+        if !visible { folderScope = nil }
+        savePrefs()
+        workspace.library.flush()
+        refreshFolderDetailsIfNeeded()
+        if !visible && hadScope { Task { await runSearch() } }
     }
 
     func setFolderTotals(_ visible: Bool) {

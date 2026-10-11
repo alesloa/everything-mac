@@ -108,15 +108,18 @@ public enum ParallelScanner {
         func release() { lock.lock(); active -= 1; lock.unlock() }
     }
 
-    /// Scan the entire filesystem from "/" and return a single FileStore.
+    /// Scan the enabled local filesystem and return a single FileStore. With the
+    /// startup volume disabled, begin at /Volumes to retain external disks.
     /// `rules` should already include the firmlink back-door exclusions so the
     /// Data volume isn't counted twice. Blocks the calling thread until complete,
     /// so call it from a detached task, never on the actor.
-    public static func scanWholeDisk(rules: ExcludeRules,
+    public static func scanWholeDisk(rules: ExcludeRules, fileSystemRoot: String = "/",
                                      isCancelled: @escaping @Sendable () -> Bool = { false },
                                      progress: (@Sendable (Int) -> Void)? = nil,
                                      onSnapshot: (@Sendable (FileStore) -> Void)? = nil) -> FileStore {
-        scan(root: "/", rules: rules, volID: 1,
+        let base = Scanner.normalizedRoot(fileSystemRoot)
+        let root = rules.excludeBootVolume ? (base == "/" ? "/Volumes" : base + "/Volumes") : base
+        return scan(root: root, rules: rules, volID: 1,
              workers: max(2, ProcessInfo.processInfo.activeProcessorCount), isCancelled: isCancelled,
              progress: progress, onSnapshot: onSnapshot)
     }

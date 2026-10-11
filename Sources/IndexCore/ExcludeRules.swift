@@ -24,11 +24,17 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
     // Network shares to index. Everything under a non-local mount is skipped by the
     // whole-disk scan; shares listed here are indexed separately, see IndexActor.
     public var networkShares: [NetworkShare]
+    // The startup filesystem can be disabled without excluding /Volumes, where
+    // external disks live. Network shares keep their separate scan policy.
+    public var excludeBootVolume: Bool
+
+    public var localScanRoot: String { excludeBootVolume ? "/Volumes" : "/" }
 
     public init(names: Set<String> = [], pathPrefixes: [String] = [],
                 excludeHidden: Bool = false, excludeDevFolders: Bool = true,
                 excludeVCSFolders: Bool = true, excludeTrash: Bool = true,
-                excludeFilePatterns: [String] = [], networkShares: [NetworkShare] = []) {
+                excludeFilePatterns: [String] = [], networkShares: [NetworkShare] = [],
+                excludeBootVolume: Bool = false) {
         self.names = names
         self.pathPrefixes = pathPrefixes
         self.excludeHidden = excludeHidden
@@ -37,6 +43,7 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
         self.excludeTrash = excludeTrash
         self.excludeFilePatterns = excludeFilePatterns
         self.networkShares = networkShares
+        self.excludeBootVolume = excludeBootVolume
     }
 
     // Settings saved before excludeDevFolders/excludeVCSFolders existed lack those
@@ -46,7 +53,7 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
     // synthesized conformance this replaces, so no pre-existing blob decodes worse.
     private enum CodingKeys: String, CodingKey {
         case names, pathPrefixes, excludeHidden, excludeDevFolders, excludeVCSFolders, excludeTrash, excludeFilePatterns
-        case networkShares
+        case networkShares, excludeBootVolume
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -58,6 +65,7 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
         excludeTrash = try c.decodeIfPresent(Bool.self, forKey: .excludeTrash) ?? true
         excludeFilePatterns = try c.decodeIfPresent([String].self, forKey: .excludeFilePatterns) ?? []
         networkShares = try c.decodeIfPresent([NetworkShare].self, forKey: .networkShares) ?? []
+        excludeBootVolume = try c.decodeIfPresent(Bool.self, forKey: .excludeBootVolume) ?? false
     }
 
     // Unambiguous regenerable build output / dependency / tool-cache directories.
@@ -167,6 +175,9 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
         mix(excludeDevFolders ? "D1" : "D0")
         mix(excludeVCSFolders ? "V1" : "V0")
         mix(excludeTrash ? "T1" : "T0")
+        // Keep existing cache fingerprints unchanged until the startup disk is
+        // explicitly disabled; switching it off or back on invalidates that cache.
+        if excludeBootVolume { mix("B0") }
         mix("N"); for n in names.sorted() { mix(n); mix("\u{1}") }
         mix("P"); for p in pathPrefixes { mix(p); mix("\u{1}") }
         mix("F"); for p in excludeFilePatterns { mix(p); mix("\u{1}") }

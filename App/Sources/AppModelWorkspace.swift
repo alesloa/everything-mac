@@ -33,7 +33,9 @@ extension AppModel {
         searchFilters = state.effectiveFilters; sortKey = Self.sortKey(from: state.sortKey); ascending = state.ascending
         resultLimit = state.resultLimit; previewVisible = state.previewVisible; thumbnailView = state.thumbnailView
         folderScope = state.folderScopePath.map { FolderScope(path: $0) }
-        folderSidebarVisible = state.folderSidebarVisible ?? false
+        // A restored bookmark or older tab must show its location restriction.
+        // Closing that visible sidebar explicitly returns to all indexed folders.
+        folderSidebarVisible = folderScope != nil || (state.folderSidebarVisible ?? false)
         indexedFolderTotals = state.indexedFolderTotals ?? false
         indexedTotalsColumnOverride = state.indexedFolderTotals
         refreshFolderDetailsIfNeeded()
@@ -43,7 +45,9 @@ extension AppModel {
         resultOrdering = false
         selectedRecords = []; selectedID = nil; results = []
         totalMatches = nil; resultSnapshotID = nil; searchError = nil
-        workspace.stage(state)
+        var visibleState = state
+        visibleState.folderSidebarVisible = folderSidebarVisible
+        workspace.stage(visibleState)
         if search { Task { await runSearch() }; focusSearch() }
     }
 

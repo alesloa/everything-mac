@@ -79,6 +79,7 @@ final class FileStoreBase: @unchecked Sendable {
     let columns: [StoreColumn]
     let count: Int
     let rootID: UInt32
+    let additionalRoots: [UInt32]
     let deletedCount: Int
     private let legacyMasks: [UInt64]
     private let derivedLock = NSLock()
@@ -104,6 +105,7 @@ final class FileStoreBase: @unchecked Sendable {
         let n = columns[3].count
         guard n <= Int(UInt32.max), columns.dropFirst().allSatisfy({ $0.count == n }) else { return nil }
         var root = FileStore.noParent, deleted = 0
+        var additionalRoots: [UInt32] = []
         var masks: [UInt64] = []
         if !hasMasks { masks.reserveCapacity(n) }
         for i in 0..<n {
@@ -114,7 +116,10 @@ final class FileStoreBase: @unchecked Sendable {
             let flags = bytes.value(at: columns[6].offset + i, as: UInt8.self)
             guard start <= columns[0].count, length <= columns[0].count - start,
                   parent == FileStore.noParent || parent < UInt32(i), live <= 1, flags <= 1 else { return nil }
-            if parent == FileStore.noParent { root = UInt32(i) }
+            if parent == FileStore.noParent {
+                if root == FileStore.noParent { root = UInt32(i) }
+                else if flags == 1 && live == 1 { additionalRoots.append(UInt32(i)) }
+            }
             if live == 0 { deleted += 1 }
             if !hasMasks {
                 masks.append(FuzzyMatcher.mask(bytes.buffer(in: (columns[0].offset + start)..<(columns[0].offset + start + length))))
@@ -124,6 +129,7 @@ final class FileStoreBase: @unchecked Sendable {
         self.columns = columns
         count = n
         rootID = root
+        self.additionalRoots = additionalRoots
         deletedCount = deleted
         legacyMasks = masks
     }

@@ -23,7 +23,7 @@ struct VolumesSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Drives to index") {
+            Section {
                 ForEach(volumes) { v in
                     Toggle(isOn: volumeBinding(v)) {
                         VStack(alignment: .leading, spacing: 1) {
@@ -32,15 +32,22 @@ struct VolumesSettingsView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
-                    // Excluding the entire boot volume would empty the index — exclude
-                    // individual folders below instead.
-                    .disabled(v.isBoot)
                 }
                 if volumes.isEmpty { Text("No local volumes found.").foregroundStyle(.secondary) }
+            } header: {
+                Text("Drives to index")
+            } footer: {
+                // Source: the owner's requested startup-disk exclusion and the
+                // separate local/network scanning policy in ExcludeRules.
+                Text("Turn off drives to exclude them from searches, then apply your changes. Turning off the startup drive keeps enabled external drives and added network volumes searchable.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section {
                 if edit.networkShares.isEmpty {
-                    Text("None").foregroundStyle(.secondary)
+                    // Source: Add Network Volume requires a mounted share, as
+                    // documented in README.md's Network volumes section.
+                    Text("Connect to the share in Finder, then add its network volume here.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(edit.networkShares) { share in
                     VStack(alignment: .leading, spacing: 5) {
@@ -216,8 +223,9 @@ struct VolumesSettingsView: View {
     }
 
     // A volume is "indexed" unless its mount path is in the excluded prefixes.
-    private func volumeBinding(_ v: VolumeInfo) -> Binding<Bool> {
-        Binding(get: { !edit.pathPrefixes.contains(v.path) },
+    func volumeBinding(_ v: VolumeInfo) -> Binding<Bool> {
+        if v.isBoot { return Binding(get: { edit.indexBootVolume }, set: { edit.indexBootVolume = $0 }) }
+        return Binding(get: { !edit.pathPrefixes.contains(v.path) },
                 set: { include in
                     if include {
                         edit.pathPrefixes.removeAll { $0 == v.path }
