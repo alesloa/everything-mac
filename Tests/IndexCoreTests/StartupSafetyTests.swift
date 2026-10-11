@@ -412,3 +412,22 @@ private final class StorageScanBudget: @unchecked Sendable {
     }
     #expect(completedBeforeWriter)
 }
+
+@Test func storageReviewParallelPartialScanRetriesFromParentEvent() throws {
+    let directory = try safetyDirectory(), blocked = directory.appendingPathComponent("blocked")
+    defer {
+        chmod(blocked.path, 0o700)
+        try? FileManager.default.removeItem(at: directory)
+    }
+    try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+    try Data([1]).write(to: blocked.appendingPathComponent("child.txt"))
+    #expect(chmod(blocked.path, 0) == 0)
+    var store = ParallelScanner.scan(root: directory.path, rules: .defaults, volID: 1, workers: 2)
+    let child = try #require(store.childID(named: "blocked", under: store.rootID))
+    #expect(!store.scanCompleted && store.childIDs(of: child).isEmpty)
+    #expect(chmod(blocked.path, 0o700) == 0)
+    #expect(LiveMonitor.reconcile(directory: directory.path, in: &store, rules: .defaults, volID: 1))
+    #expect(store.childID(named: "child.txt", under: child) != nil)
+    #expect(store.childIDs(of: child).count == 1)
+    #expect(!store.subtreeIsIncomplete(child) && !store.subtreeIsIncomplete(store.rootID))
+}
