@@ -215,10 +215,12 @@ public actor IndexCacheWriter {
     private var savedRevision: UInt64 = 0
     public init() {}
 
+    @discardableResult
     public func save(_ store: FileStore, to url: URL, lastEventID: UInt64,
-                     rulesFingerprint: UInt64, revision: UInt64) throws {
-        guard revision > savedRevision else { return }
+                     rulesFingerprint: UInt64, revision: UInt64) throws -> Bool {
+        guard revision > savedRevision else { return false }
         try IndexCache.save(store, to: url, lastEventID: lastEventID, rulesFingerprint: rulesFingerprint)
         savedRevision = revision
+        return true
     }
 }
