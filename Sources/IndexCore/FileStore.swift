@@ -1,207 +1,178 @@
 import Foundation
 
-// Compatibility view shared with the mapped-base/append-overlay storage layer.
-struct FileNameArena {
-    let buffer: UnsafeBufferPointer<UInt8>
-    func bytes(in range: Range<Int>) -> UnsafeBufferPointer<UInt8> {
-        UnsafeBufferPointer(start: buffer.baseAddress?.advanced(by: range.lowerBound), count: range.count)
-    }
-}
-
-// Flat in-memory index. Names live in one contiguous UTF-8 arena; metadata in
-// parallel arrays indexed by record id. Full path is reconstructed by walking
-// `parents` to the root.
+// Immutable mapped base plus an append-only, column-oriented live overlay. IDs
+// are stable slots, including tombstones; compaction never renumbers records.
 public struct FileStore: Sendable {
     public static let noParent: UInt32 = .max
-
+    private var base: FileStoreBase?
+    private var lineage = UUID()
+    private var compactedRevision: UInt64 = 0
     private var nameBytes: [UInt8] = []
     private var nameOffset: [UInt32] = []
     private var nameLen: [UInt16] = []
     private var parents: [UInt32] = []
     private var sizes: [UInt64] = []
     private var mtimes: [Int64] = []
-    private var flags: [UInt8] = []     // bit0 = isDir
+    private var flags: [UInt8] = []
     private var volIDs: [UInt32] = []
-    private var live: [Bool] = []
-    // Derived fuzzy-search rejection masks. Old binary caches remain compatible.
     private var nameMasks: [UInt64] = []
-
-    // parent id → its child ids. Without this, child/path lookups are O(n) scans
-    // that rebuild every record's path string — FSEvents reconcile then pegs a
-    // core for tens of seconds and starves search. Derived (not serialized);
-    // rebuilt on binary load and maintained on append.
+    // Sparse 64-slot tombstone words keep the cost proportional to live changes,
+    // rather than copying every base record's live flag after each publication.
+    private var deletedWords: [Int: UInt64] = [:]
     private var childrenByParent: [UInt32: [UInt32]] = [:]
-    // dir id → last-reconciled mtime (ns). Derived, not serialized; see reconcileMtime.
     private var dirReconcileMtime: [UInt32: Int64] = [:]
     public private(set) var rootID: UInt32 = .max
-
-    // Count of tombstoned (deleted) records. Lets the empty-query path return the
-    // whole id range directly when nothing's been deleted, instead of filtering
-    // millions of live records just to drop a handful of dead ones.
-    public private(set) var deletedCount: Int = 0
+    public private(set) var deletedCount = 0
+    public private(set) var revision: UInt64 = 0
     public var hasDeletions: Bool { deletedCount > 0 }
-
+    public var baseCount: Int { base?.count ?? 0 }
+    public var overlayCount: Int { parents.count }
+    public var count: Int { baseCount + overlayCount }
+    public var baseIdentity: ObjectIdentifier? { base.map(ObjectIdentifier.init) }
+    public var needsCompaction: Bool {
+        count > 0 && (base == nil || overlayCount >= max(4_096, min(50_000, baseCount / 20)) || deletedWords.count >= max(256, min(4_096, baseCount / 512)))
+    }
     public init() {}
 
-    public var count: Int { parents.count }
+    func cachedBaseValue<Value: Sendable>(key: String, build: () -> Value?) -> Value? {
+        base?.cachedValue(key: key, build: build)
+    }
 
-    // Search needs names and metadata, not the writer's mutable lookup tables.
-    // Dropping those references avoids copying a large dictionary just to record
-    // an unchanged directory's reconcile mtime.
-    func searchSnapshot() -> FileStore {
+    public func storageSnapshot() -> FileStore {
         var copy = self
         copy.childrenByParent = [:]
         copy.dirReconcileMtime = [:]
         return copy
     }
 
-    /// Appends a new record to the store and returns its id.
-    /// `name` must be a single path component (≤ NAME_MAX = 255 bytes).
-    /// `nameLen` is stored as `UInt16`; names longer than 65535 bytes will trap.
+    func searchSnapshot() -> FileStore { storageSnapshot() }
+
     @discardableResult
     public mutating func append(name: String, parent: UInt32, size: UInt64,
                                 mtime: Int64, isDir: Bool, volID: UInt32) -> UInt32 {
         let bytes = Array(name.utf8)
-        let id = UInt32(parents.count)
+        precondition(count < Int(UInt32.max) && bytes.count <= Int(UInt16.max))
+        precondition((base?.names.count ?? 0) + nameBytes.count <= Int(UInt32.max) - bytes.count)
+        let id = UInt32(count)
         nameOffset.append(UInt32(nameBytes.count))
         nameLen.append(UInt16(bytes.count))
         nameBytes.append(contentsOf: bytes)
         nameMasks.append(FuzzyMatcher.mask(bytes))
-        parents.append(parent)
-        sizes.append(size)
-        mtimes.append(mtime)
-        flags.append(isDir ? 1 : 0)
-        volIDs.append(volID)
-        live.append(true)
+        parents.append(parent); sizes.append(size); mtimes.append(mtime)
+        flags.append(isDir ? 1 : 0); volIDs.append(volID)
         if parent == Self.noParent { rootID = id }
         else { childrenByParent[parent, default: []].append(id) }
+        revision &+= 1
         return id
     }
 
     public func name(of id: UInt32) -> String {
-        let i = Int(id)
-        let start = Int(nameOffset[i])
-        let end = start + Int(nameLen[i])
-        return String(decoding: nameBytes[start..<end], as: UTF8.self)
+        withNameArena { String(decoding: $0.bytes(in: nameRange(of: id)), as: UTF8.self) }
     }
-
+    // Compatibility accessor; scan loops borrow withNameArena instead of copying.
     public func nameBytesSlice(of id: UInt32) -> ArraySlice<UInt8> {
-        let i = Int(id)
-        let start = Int(nameOffset[i])
-        return nameBytes[start..<(start + Int(nameLen[i]))]
+        withNameArena { Array($0.bytes(in: nameRange(of: id)))[...] }
     }
-
-    func nameMask(of id: UInt32) -> UInt64 { nameMasks[Int(id)] }
-
+    func nameMask(of id: UInt32) -> UInt64 {
+        let i = Int(id)
+        return i < baseCount ? base!.mask(i) : nameMasks[i - baseCount]
+    }
     func nameRange(of id: UInt32) -> Range<Int> {
-        let start = Int(nameOffset[Int(id)])
-        return start..<(start + Int(nameLen[Int(id)]))
+        let i = Int(id), count = baseCount
+        if i < count {
+            let start = Int(base!.value(1, i, as: UInt32.self))
+            return start..<(start + Int(base!.value(2, i, as: UInt16.self)))
+        }
+        let start = (base?.names.count ?? 0) + Int(nameOffset[i - count])
+        return start..<(start + Int(nameLen[i - count]))
     }
-
-    var baseCount: Int { 0 }
-    func cachedBaseValue<Value: Sendable>(key: String, build: () -> Value?) -> Value? { nil }
-
     func withNameArena<R>(_ body: (FileNameArena) -> R) -> R {
-        nameBytes.withUnsafeBufferPointer { body(FileNameArena(buffer: $0)) }
+        nameBytes.withUnsafeBufferPointer {
+            body(FileNameArena(base: base?.names ?? UnsafeBufferPointer(start: nil, count: 0), appended: $0))
+        }
     }
 
-    /// ASCII-case-insensitive lexicographic compare of two records' names by their
-    /// raw UTF-8 bytes. Returns true if `a` sorts before `b`. This replaces
-    /// `String.localizedStandardCompare`, which dominated typing latency — folding
-    /// 'A'–'Z' inline over the byte arena is ~20× faster and allocation-free, so
-    /// even sorting a multi-million-id match set stays responsive.
     public func nameSortsBefore(_ a: UInt32, _ b: UInt32) -> Bool {
-        let ai = Int(a), bi = Int(b)
-        let aStart = Int(nameOffset[ai]), aLen = Int(nameLen[ai])
-        let bStart = Int(nameOffset[bi]), bLen = Int(nameLen[bi])
-        let n = min(aLen, bLen)
-        return nameBytes.withUnsafeBufferPointer { buf in
-            var i = 0
-            while i < n {
-                var ca = buf[aStart + i]
-                var cb = buf[bStart + i]
-                if ca >= 65 && ca <= 90 { ca &+= 32 }   // 'A'–'Z' → lowercase
-                if cb >= 65 && cb <= 90 { cb &+= 32 }
+        withNameArena { arena in
+            let left = arena.bytes(in: nameRange(of: a)), right = arena.bytes(in: nameRange(of: b))
+            for i in 0..<min(left.count, right.count) {
+                let ca = Self.lower(left[i]), cb = Self.lower(right[i])
                 if ca != cb { return ca < cb }
-                i += 1
             }
-            return aLen < bLen
+            return left.count < right.count
         }
     }
-
-    // Byte range of a record's file extension within `nameBytes` (the chars after
-    // the last interior '.'). Leading dot (hidden file) doesn't count, so a name
-    // like ".gitignore" has no extension. Returns len 0 when there's none.
-    private func extRange(of id: UInt32) -> (start: Int, len: Int) {
-        let i = Int(id)
-        let start = Int(nameOffset[i]); let len = Int(nameLen[i])
-        var dot = -1
-        nameBytes.withUnsafeBufferPointer { buf in
-            var j = len - 1
-            while j > 0 {                       // j > 0: a leading dot is not a separator
-                if buf[start + j] == 46 { dot = j; break }   // '.'
-                j -= 1
-            }
+    private static func lower(_ c: UInt8) -> UInt8 { c >= 65 && c <= 90 ? c &+ 32 : c }
+    private func extensionBytes(_ name: UnsafeBufferPointer<UInt8>) -> UnsafeBufferPointer<UInt8> {
+        var i = name.count - 1
+        while i > 0 {
+            if name[i] == 46 { return UnsafeBufferPointer(start: name.baseAddress?.advanced(by: i + 1), count: name.count - i - 1) }
+            i -= 1
         }
-        if dot <= 0 { return (start + len, 0) }
-        return (start + dot + 1, len - dot - 1)
+        return UnsafeBufferPointer(start: nil, count: 0)
     }
-
-    // Order by file "kind": directories first (grouped), then files grouped by
-    // extension (ASCII case-insensitive), with name as the tiebreak so equal
-    // kinds stay name-ordered. Same allocation-free byte path as nameSortsBefore.
     public func kindSortsBefore(_ a: UInt32, _ b: UInt32) -> Bool {
         let ad = isDir(of: a), bd = isDir(of: b)
-        if ad != bd { return ad }              // folders before files
-        let (aStart, aLen) = extRange(of: a)
-        let (bStart, bLen) = extRange(of: b)
-        let n = min(aLen, bLen)
-        let cmp: Int = nameBytes.withUnsafeBufferPointer { buf in
-            var i = 0
-            while i < n {
-                var ca = buf[aStart + i], cb = buf[bStart + i]
-                if ca >= 65 && ca <= 90 { ca &+= 32 }
-                if cb >= 65 && cb <= 90 { cb &+= 32 }
+        if ad != bd { return ad }
+        let cmp: Int = withNameArena { arena in
+            let left = extensionBytes(arena.bytes(in: nameRange(of: a)))
+            let right = extensionBytes(arena.bytes(in: nameRange(of: b)))
+            for i in 0..<min(left.count, right.count) {
+                let ca = Self.lower(left[i]), cb = Self.lower(right[i])
                 if ca != cb { return ca < cb ? -1 : 1 }
-                i += 1
             }
-            if aLen != bLen { return aLen < bLen ? -1 : 1 }
-            return 0
+            return left.count == right.count ? 0 : (left.count < right.count ? -1 : 1)
         }
-        if cmp != 0 { return cmp < 0 }
-        return nameSortsBefore(a, b)
+        return cmp == 0 ? nameSortsBefore(a, b) : cmp < 0
     }
-
-    public func parent(of id: UInt32) -> UInt32 { parents[Int(id)] }
-    public func size(of id: UInt32) -> UInt64 { sizes[Int(id)] }
-    public func mtime(of id: UInt32) -> Int64 { mtimes[Int(id)] }
-    public func isDir(of id: UInt32) -> Bool { flags[Int(id)] & 1 == 1 }
-    public func volID(of id: UInt32) -> UInt32 { volIDs[Int(id)] }
-
-    public func isLive(_ id: UInt32) -> Bool { live[Int(id)] }
+    public func parent(of id: UInt32) -> UInt32 {
+        let i = Int(id); return i < baseCount ? base!.value(3, i, as: UInt32.self) : parents[i - baseCount]
+    }
+    public func size(of id: UInt32) -> UInt64 {
+        let i = Int(id); return i < baseCount ? base!.value(4, i, as: UInt64.self) : sizes[i - baseCount]
+    }
+    public func mtime(of id: UInt32) -> Int64 {
+        let i = Int(id); return i < baseCount ? base!.value(5, i, as: Int64.self) : mtimes[i - baseCount]
+    }
+    public func isDir(of id: UInt32) -> Bool {
+        let i = Int(id); let flag: UInt8 = i < baseCount ? base!.value(6, i, as: UInt8.self) : flags[i - baseCount]
+        return flag & 1 == 1
+    }
+    public func volID(of id: UInt32) -> UInt32 {
+        let i = Int(id); return i < baseCount ? base!.value(7, i, as: UInt32.self) : volIDs[i - baseCount]
+    }
+    public func isLive(_ id: UInt32) -> Bool {
+        let i = Int(id)
+        guard i < count else { return false }
+        if let word = deletedWords[i >> 6], word & (UInt64(1) << (i & 63)) != 0 { return false }
+        return i >= baseCount || base!.value(8, i, as: UInt8.self) == 1
+    }
     public mutating func markDeleted(_ id: UInt32) {
-        if live[Int(id)] { live[Int(id)] = false; deletedCount += 1 }
+        if isLive(id) {
+                let i = Int(id)
+            deletedWords[i >> 6, default: 0] |= UInt64(1) << (i & 63)
+            deletedCount += 1; revision &+= 1
+        }
     }
-
     public mutating func markSubtreeDeleted(_ id: UInt32) {
-        markDeleted(id)
-        for child in childIDs(of: id) { markSubtreeDeleted(child) }
+        var stack = [id]
+        while let next = stack.popLast() {
+            stack.append(contentsOf: childIDs(of: next))
+            markDeleted(next)
+        }
     }
-
-    /// Tombstone every live record of a volume. Returns how many were removed.
     @discardableResult
     public mutating func markDeleted(volID: UInt32) -> Int {
-        var n = 0
-        for i in 0..<parents.count where live[i] && volIDs[i] == volID {
-            live[i] = false; deletedCount += 1; n += 1
+        var removed = 0
+        for i in 0..<count where isLive(UInt32(i)) && self.volID(of: UInt32(i)) == volID {
+            markDeleted(UInt32(i)); removed += 1
         }
-        return n
+        return removed
     }
-
     public func liveCount(volID: UInt32) -> Int {
-        var n = 0
-        for i in 0..<parents.count where live[i] && volIDs[i] == volID { n += 1 }
-        return n
+        (0..<count).reduce(into: 0) { n, i in
+            if isLive(UInt32(i)) && self.volID(of: UInt32(i)) == volID { n += 1 }
+        }
     }
 
     /// Graft a separately scanned tree under `parent`. The subtree's root becomes a
@@ -267,95 +238,124 @@ public struct FileStore: Sendable {
         return cur
     }
 
-    // MARK: - Binary serialization
-    //
-    // The parallel arrays are dumped as raw little-endian bytes with a length
-    // prefix per array. Loading is a handful of memcpys, so a multi-million-record
-    // index restores in ~1s — versus tens of seconds to JSON-parse the same data.
-    // Layout: ["EMS1" magic] then, for each array: [UInt64 count][raw element bytes].
-    private static let magic: [UInt8] = Array("EMS1".utf8)
-
-    private static func appendArray<T>(_ arr: [T], to data: inout Data) {
-        var n = UInt64(arr.count)
-        withUnsafeBytes(of: &n) { data.append(contentsOf: $0) }
-        arr.withUnsafeBytes { data.append(contentsOf: $0) }
-    }
-
-    // Reads `count` then `count` elements of T (via memcpy, alignment-safe).
-    private static func readArray<T>(_ : T.Type, from data: Data, _ cursor: inout Int) -> [T]? {
-        guard cursor + 8 <= data.count else { return nil }
-        let n = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: cursor, as: UInt64.self) }
-        cursor += 8
-        // Check before converting/multiplying a count from disk. A corrupt cache
-        // must fail to load, never overflow or create an out-of-bounds byte view.
-        guard n <= UInt64((data.count - cursor) / MemoryLayout<T>.stride) else { return nil }
-        let bytes = Int(n) * MemoryLayout<T>.stride
-        guard cursor + bytes <= data.count else { return nil }
-        let arr = [T](unsafeUninitializedCapacity: Int(n)) { buf, initialized in
-            if bytes > 0 {
-                data.copyBytes(to: UnsafeMutableRawBufferPointer(buf), from: cursor..<(cursor + bytes))
+    // EMS2 retains the EMS1 columns and appends precomputed search masks.
+    // Stream columns directly from the mapping and small overlay; a cache save
+    // never materializes a second full-size Data/array copy of the base.
+    func writeBinary(_ emit: (UnsafeRawBufferPointer) throws -> Void) throws {
+        func scalar<T>(_ value: T) throws {
+            var value = value
+            try withUnsafeBytes(of: &value, emit)
+        }
+        func column<T>(_ number: Int, _ appended: [T]) throws {
+            try scalar(UInt64(count))
+            if let base { try emit(UnsafeRawBufferPointer(start: base.bytes.address.advanced(by: base.columns[number].offset), count: base.columns[number].bytes.count)) }
+            try appended.withUnsafeBytes(emit)
+        }
+        func generated<T>(_ values: (Int) -> T) throws {
+            try scalar(UInt64(count))
+            var start = 0
+            while start < count {
+                let end = min(count, start + 65_536)
+                let chunk = (start..<end).map(values)
+                try chunk.withUnsafeBytes(emit)
+                start = end
             }
-            initialized = Int(n)
         }
-        cursor += bytes
-        return arr
+        let baseBytes = base?.columns[0].count ?? 0
+        guard baseBytes <= Int(UInt32.max) - nameBytes.count else { throw IndexCache.CacheError() }
+        try Array("EMS2".utf8).withUnsafeBytes(emit)
+        try scalar(UInt64(baseBytes + nameBytes.count))
+        if let base { try emit(UnsafeRawBufferPointer(base.names)) }
+        try nameBytes.withUnsafeBytes(emit)
+        // Base offsets stay intact; overlay names follow the base arena.
+        try scalar(UInt64(count))
+        if let base { try emit(UnsafeRawBufferPointer(start: base.bytes.address.advanced(by: base.columns[1].offset), count: base.columns[1].bytes.count)) }
+        var start = 0
+        while start < nameOffset.count {
+            let end = min(nameOffset.count, start + 65_536)
+            let adjusted = nameOffset[start..<end].map { $0 + UInt32(baseBytes) }
+            try adjusted.withUnsafeBytes(emit)
+            start = end
+        }
+        try column(2, nameLen); try column(3, parents); try column(4, sizes)
+        try column(5, mtimes); try column(6, flags); try column(7, volIDs)
+        try generated { isLive(UInt32($0)) ? UInt8(1) : UInt8(0) }
+        if let base, base.columns.count == 10 { try column(9, nameMasks) }
+        else { try generated { nameMask(of: UInt32($0)) } }
     }
-
     func serializedBinary() -> Data {
-        var data = Data()
-        data.append(contentsOf: Self.magic)
-        Self.appendArray(nameBytes, to: &data)
-        Self.appendArray(nameOffset, to: &data)
-        Self.appendArray(nameLen, to: &data)
-        Self.appendArray(parents, to: &data)
-        Self.appendArray(sizes, to: &data)
-        Self.appendArray(mtimes, to: &data)
-        Self.appendArray(flags, to: &data)
-        Self.appendArray(volIDs, to: &data)
-        Self.appendArray(live, to: &data)
-        return data
+        var result = Data()
+        // writeBinary only throws for an arena beyond the format's UInt32 limit.
+        try! writeBinary { result.append(contentsOf: $0) }
+        return result
     }
 
-    init?(binary data: Data) {
-        var cursor = 0
-        guard data.count >= Self.magic.count,
-              Array(data[0..<Self.magic.count]) == Self.magic else { return nil }
-        cursor = Self.magic.count
-        guard let nb = Self.readArray(UInt8.self, from: data, &cursor),
-              let no = Self.readArray(UInt32.self, from: data, &cursor),
-              let nl = Self.readArray(UInt16.self, from: data, &cursor),
-              let pa = Self.readArray(UInt32.self, from: data, &cursor),
-              let sz = Self.readArray(UInt64.self, from: data, &cursor),
-              let mt = Self.readArray(Int64.self, from: data, &cursor),
-              let fl = Self.readArray(UInt8.self, from: data, &cursor),
-              let vo = Self.readArray(UInt32.self, from: data, &cursor),
-              let lv = Self.readArray(Bool.self, from: data, &cursor) else { return nil }
-        let n = pa.count
-        guard n <= Int(UInt32.max), no.count == n, nl.count == n, sz.count == n,
-              mt.count == n, fl.count == n, vo.count == n, lv.count == n else { return nil }
-        for i in 0..<n {
-            let offset = Int(no[i]), length = Int(nl[i])
-            guard offset <= nb.count, length <= nb.count - offset,
-                  pa[i] == Self.noParent || pa[i] < UInt32(i) else { return nil }
+    // All record fields are immutable after append. A delayed compaction can
+    // therefore rebase the newly appended suffix and deletion words over its
+    // completed base without losing updates or waiting for a quiet filesystem.
+    /// `compacted` must originate from a storageSnapshot of this single writer.
+    /// Independently mutated value forks are not valid compaction sources. The
+    /// app enforces this contract by keeping every mutation on IndexActor.
+    @discardableResult
+    public mutating func adoptCompaction(_ compacted: FileStore, expectedRevision: UInt64) -> Bool {
+        guard lineage == compacted.lineage, compacted.revision == expectedRevision,
+              revision >= expectedRevision, expectedRevision >= compactedRevision, compacted.count <= count,
+              baseCount <= compacted.count, compacted.base != nil,
+              compacted.overlayCount == 0 else { return false }
+        let cut = compacted.count - baseCount
+        let nameCut = cut < nameOffset.count ? Int(nameOffset[cut]) : nameBytes.count
+        nameBytes = Array(nameBytes[nameCut...])
+        nameOffset = nameOffset[cut...].map { $0 - UInt32(nameCut) }
+        nameLen = Array(nameLen[cut...]); parents = Array(parents[cut...])
+        sizes = Array(sizes[cut...]); mtimes = Array(mtimes[cut...])
+        flags = Array(flags[cut...]); volIDs = Array(volIDs[cut...])
+        nameMasks = Array(nameMasks[cut...])
+        // Discard deletion bits already persisted in the new base. Keep every
+        // deletion made while compaction was running, including overlay records.
+        var remaining: [Int: UInt64] = [:]
+        for (wordID, word) in deletedWords {
+            var bits = word, keep: UInt64 = 0
+            while bits != 0 {
+                let bit = bits.trailingZeroBitCount, id = wordID * 64 + bit
+                if id >= compacted.count || compacted.base!.value(8, id, as: UInt8.self) == 1 {
+                    keep |= UInt64(1) << bit
+                }
+                bits &= bits - 1
+            }
+            if keep != 0 { remaining[wordID] = keep }
         }
-        nameBytes = nb; nameOffset = no; nameLen = nl; parents = pa
-        sizes = sz; mtimes = mt; flags = fl; volIDs = vo; live = lv
-        rebuildChildIndex()
-        nameMasks = (0..<count).map { FuzzyMatcher.mask(nameBytesSlice(of: UInt32($0))) }
+        deletedWords = remaining
+        base = compacted.base
+        compactedRevision = expectedRevision
+        return true
     }
 
-    // Rebuild the derived parent→children index (and rootID) from `parents`.
-    // O(n) single pass — called after a binary load, since the index isn't stored.
+    /// Build a private mapping off the writer actor. The temporary pathname is
+    /// unlinked immediately after mapping, so nobody can truncate its inode.
+    public func compacted() throws -> FileStore {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("everything-base-\(UUID().uuidString).idx")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try IndexCache.save(self, to: url, lastEventID: 0, rulesFingerprint: 0)
+        var result = try IndexCache.load(from: url, buildWriterIndex: false).0
+        result.revision = revision
+        result.lineage = lineage
+        result.compactedRevision = revision
+        return result
+    }
+
+    init?(storage: StoreBytes, offset: Int, buildWriterIndex: Bool = true) {
+        guard let base = FileStoreBase(bytes: storage, offset: offset) else { return nil }
+        self.base = base
+        rootID = base.rootID; deletedCount = base.deletedCount
+        if buildWriterIndex { rebuildChildIndex() }
+    }
+    init?(binary data: Data) { self.init(storage: StoreBytes(data: data), offset: 0) }
+
     private mutating func rebuildChildIndex() {
-        childrenByParent.removeAll(keepingCapacity: false)
-        childrenByParent.reserveCapacity(parents.count / 4)
-        rootID = Self.noParent
-        deletedCount = 0
-        for i in 0..<parents.count {
-            let p = parents[i]
-            if p == Self.noParent { rootID = UInt32(i) }
-            else { childrenByParent[p, default: []].append(UInt32(i)) }
-            if !live[i] { deletedCount += 1 }
+        childrenByParent.reserveCapacity(count / 4)
+        for i in 0..<count {
+            let p = parent(of: UInt32(i))
+            if p != Self.noParent { childrenByParent[p, default: []].append(UInt32(i)) }
         }
     }
 }

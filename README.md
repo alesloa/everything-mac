@@ -26,7 +26,7 @@ So I wrote my own. It reads every filename on the machine into memory and search
 - Standard results table with Name, Path, Size, Kind, and Date Modified. Click a header to sort.
 - Shows the real file-type icon and a readable kind for each row.
 - Right-click menu: Open, Open With (lists every app associated with the file, plus a "Choose Application…" option to open it with anything), Reveal in Finder, Copy Path, Copy Name, Move to Trash.
-- Handles millions of files without choking. The index is a flat array scanned in parallel across all cores.
+- Handles millions of files with parallel search, shared filename scoring, and reuse of prior candidates as you keep typing.
 - First-launch onboarding waits for Full Disk Access before scanning, with an option to continue without it.
 - Opt-in network-volume indexing in Settings > Volumes. Selected shares are scanned in the background, retain cached results while offline, and reconnect at launch and after sleep using credentials already saved in the keychain.
 - Searches immutable snapshots on separate workers. Directory reconciliation, full rebuilds, network-tree merges, and cache saves keep the last published files searchable; new changes appear after publication. Superseded queries are cancelled.
@@ -58,9 +58,17 @@ swift test -c release
 ./scripts/test-search-isolation.sh
 ```
 
-Snapshots share immutable name/metadata arrays through Swift copy-on-write.
-Changing the index can temporarily retain both the old and new arrays, trading
-additional memory during updates for independent search latency.
+The storage path in [`FileStore.swift`](Sources/IndexCore/FileStore.swift) and
+[`IndexActor.swift`](App/Sources/IndexActor.swift) shares an immutable,
+memory-mapped base between searches and the indexing writer. New records and
+deletions use a small overlay, avoiding copies of the complete base during live
+updates. Background compaction folds that overlay into a new mapping while
+existing searches retain their original snapshot and record IDs.
+
+[`UniqueNameIndex.swift`](Sources/IndexCore/UniqueNameIndex.swift) prepares the
+filename dictionary in the background. Searches keep using the parallel scan
+until it is ready, then reuse the base dictionary across live updates. The
+derived dictionary and any snapshots still in use require additional memory.
 
 ## Requirements
 
@@ -105,9 +113,10 @@ Launch it and start typing. Matches show up right away. Click a column header to
 
 ## How it works
 
-- Every filename lives in one big UTF-8 buffer, with the metadata (size, dates, flags) held in parallel arrays alongside it. That whole structure gets written to a binary cache so restarts are fast.
-- A search runs as a parallel substring scan across all CPU cores, feeding a fixed-size max-heap that keeps only the top results. That's what keeps typing responsive even with millions of records.
-- An FSEvents watcher folds new, renamed, and deleted files back into the index so it never needs a full rescan.
+- [`FileStore.swift`](Sources/IndexCore/FileStore.swift) keeps UTF-8 names and metadata in columns: a mapped base plus appended records and sparse deletion flags. [`IndexCache.swift`](Sources/IndexCore/IndexCache.swift) streams those columns to an atomically replaced binary cache and still reads the previous cache format.
+- [`UniqueNameIndex.swift`](Sources/IndexCore/UniqueNameIndex.swift) groups byte-identical filenames and uses character bitmaps to reject groups of 64 names. The matcher scores each surviving name once, then expands it back to live records with their own paths and metadata.
+- [`SearchIndex.swift`](Sources/IndexCore/SearchIndex.swift) reuses the complete previous match set when [`QueryNarrowing.swift`](Sources/IndexCore/QueryNarrowing.swift) proves the new query can only narrow it. It rescans when editing or changing options could add matches, and always recomputes scores and sorting.
+- [`IndexActor.swift`](App/Sources/IndexActor.swift) applies FSEvents and publishes coherent snapshots. Searches, filename preparation, cache writes, and compaction run separately from the filesystem writer.
 
 ## License
 
