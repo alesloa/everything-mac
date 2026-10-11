@@ -2,5 +2,6 @@ import Testing
 @testable import IndexCore
 
 @Test func versionIsSet() {
-    #expect(IndexCore.version == "0.1.0")
+    // Source: the application version in App/project.yml.
+    #expect(IndexCore.version == "0.5.0")
 }
