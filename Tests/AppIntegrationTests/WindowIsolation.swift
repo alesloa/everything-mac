@@ -68,6 +68,8 @@ import IndexCore
         first.workspaceStateChanged()
         let originalTab = first.workspace.window.selectedTabID
         first.newSearchTab()
+        check(first.totalMatches == nil && first.resultSnapshotID == nil && first.searchError == nil,
+              "A fresh tab kept the previous tab's count, snapshot, or error")
         first.query = "second"; first.workspaceStateChanged()
         first.selectSearchTab(originalTab)
         await first.runSearch()

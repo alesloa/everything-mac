@@ -37,6 +37,7 @@ extension AppModel {
         indexedTotalsColumnOverride = state.indexedFolderTotals
         refreshFolderDetailsIfNeeded()
         selectedRecords = []; selectedID = nil; results = []
+        totalMatches = nil; resultSnapshotID = nil; searchError = nil
         workspace.stage(state)
         if search { Task { await runSearch() }; focusSearch() }
     }
