@@ -31,11 +31,17 @@ public enum ParallelScanner {
 
         // Append all children of `parent`, returning their ids in input order so
         // the caller can pair subdirectory entries with their new ids.
-        func appendChildren(_ entries: [Entry], parent: UInt32) -> [UInt32] {
+        func markIncomplete() { lock.withLock { store.markScanIncomplete() } }
+
+        func appendChildren(_ entries: [Entry], parent: UInt32,
+                            isCancelled: @Sendable () -> Bool) -> [UInt32] {
             lock.lock()
-            let ids = entries.map {
-                store.append(name: $0.name, parent: parent, size: $0.size,
-                             mtime: $0.mtime, isDir: $0.isDir, volID: volID)
+            var ids: [UInt32] = []
+            ids.reserveCapacity(entries.count)
+            for (offset, entry) in entries.enumerated() {
+                if offset & 1023 == 0 && isCancelled() { break }
+                ids.append(store.append(name: entry.name, parent: parent, size: entry.size,
+                                        mtime: entry.mtime, isDir: entry.isDir, volID: volID))
             }
             let count = store.count
             let crossed = count / 50_000 != lastReported / 50_000
@@ -61,7 +67,7 @@ public enum ParallelScanner {
         private let lock = NSLock()
         private var active = 0
 
-        init(seed: (String, UInt32)) { stack.append(seed) }
+        init(seed: [(String, UInt32)]) { stack = seed }
 
         func push(_ items: [(String, UInt32)]) {
             guard !items.isEmpty else { return }
@@ -69,8 +75,9 @@ public enum ParallelScanner {
         }
 
         // Claim the next directory, or return nil once the whole tree is done.
-        func claim() -> (path: String, parent: UInt32)? {
+        func claim(isCancelled: @Sendable () -> Bool) -> (path: String, parent: UInt32)? {
             while true {
+                if isCancelled() { return nil }
                 lock.lock()
                 if let item = stack.popLast() { active += 1; lock.unlock(); return item }
                 if active == 0 { lock.unlock(); return nil }   // empty + nobody working → done
@@ -87,25 +94,38 @@ public enum ParallelScanner {
     /// Data volume isn't counted twice. Blocks the calling thread until complete,
     /// so call it from a detached task, never on the actor.
     public static func scanWholeDisk(rules: ExcludeRules,
+                                     isCancelled: @escaping @Sendable () -> Bool = { false },
                                      progress: (@Sendable (Int) -> Void)? = nil) -> FileStore {
         scan(root: "/", rules: rules, volID: 1,
-             workers: max(2, ProcessInfo.processInfo.activeProcessorCount), progress: progress)
+             workers: max(2, ProcessInfo.processInfo.activeProcessorCount), isCancelled: isCancelled, progress: progress)
     }
 
     /// Scan one directory tree into its own FileStore, rooted at `root` (stored as
     /// the root record's name so paths come out absolute). `workers` is capped by
     /// the caller: a network share wants a few parallel readers, not every core.
+    /// Cancellation or an unreadable root returns an empty store. Descendant read
+    /// failures retain the readable portion and set `scanCompleted` to false.
     public static func scan(root: String, rules: ExcludeRules, volID: UInt32, workers: Int,
+                            isCancelled: @escaping @Sendable () -> Bool = { false },
                             progress: (@Sendable (Int) -> Void)? = nil) -> FileStore {
+        guard !isCancelled() else { return FileStore() }
+        let rootName = Scanner.normalizedRoot(root)
+        guard let rootEntries = readDirectory(rootName, rules: rules, isCancelled: isCancelled) else { return FileStore() }
         let builder = Builder(volID: volID, progress: progress)
-        let rootName = root == "/" ? "/" : (root.hasSuffix("/") ? String(root.dropLast()) : root)
+        if rootEntries.incomplete { builder.markIncomplete() }
         let rootID = builder.appendRoot(name: rootName)
-        let queue = DirQueue(seed: (rootName, rootID))
+        let ids = builder.appendChildren(rootEntries.entries, parent: rootID, isCancelled: isCancelled)
+        let initial = zip(rootEntries.entries, ids).filter { $0.0.isDir }.map { ($0.0.path, $0.1) }
+        let queue = DirQueue(seed: initial)
 
         DispatchQueue.concurrentPerform(iterations: max(1, workers)) { _ in
-            while let (path, parent) = queue.claim() {
-                let entries = readDirectory(path, rules: rules)
-                let ids = builder.appendChildren(entries, parent: parent)
+            while let (path, parent) = queue.claim(isCancelled: isCancelled) {
+                guard let listing = readDirectory(path, rules: rules, isCancelled: isCancelled) else {
+                    builder.markIncomplete(); queue.release(); continue
+                }
+                if listing.incomplete { builder.markIncomplete() }
+                let entries = listing.entries
+                let ids = builder.appendChildren(entries, parent: parent, isCancelled: isCancelled)
                 var subdirs: [(String, UInt32)] = []
                 for (entry, id) in zip(entries, ids) where entry.isDir {
                     subdirs.append((entry.path, id))
@@ -114,7 +134,7 @@ public enum ParallelScanner {
                 queue.release()
             }
         }
-        return builder.finish()
+        return isCancelled() ? FileStore() : builder.finish()
     }
 
     // One directory level: readdir + lstat each entry, applying exclude rules.
@@ -126,12 +146,19 @@ public enum ParallelScanner {
     // applies the now-marker-aware exclude rules and stats only the survivors. The
     // marker pass is what lets generic names like "build"/"target" be skipped inside
     // a real project but kept for an unrelated user folder of the same name.
-    private static func readDirectory(_ path: String, rules: ExcludeRules) -> [Entry] {
-        guard let dir = opendir(path) else { return [] }
+    private static func readDirectory(_ path: String, rules: ExcludeRules,
+                                      isCancelled: @Sendable () -> Bool) -> (entries: [Entry], incomplete: Bool)? {
+        guard !isCancelled(), let dir = Scanner.openDirectory(path) else { return nil }
         defer { closedir(dir) }
         var names: [String] = []
         var inProjectDir = false
-        while let entp = readdir(dir) {
+        while true {
+            if names.count & 1023 == 0 && isCancelled() { return nil }
+            errno = 0
+            guard let entp = readdir(dir) else {
+                if errno != 0 { return nil }
+                break
+            }
             let name = withUnsafePointer(to: entp.pointee.d_name) {
                 $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX)) { String(cString: $0) }
             }
@@ -141,18 +168,20 @@ public enum ParallelScanner {
         }
         var out: [Entry] = []
         out.reserveCapacity(names.count)
-        for name in names {
+        var incomplete = false
+        for (offset, name) in names.enumerated() {
+            if offset & 1023 == 0 && isCancelled() { return nil }
             let full = path == "/" ? "/" + name : path + "/" + name
             let isHidden = name.hasPrefix(".")
             if rules.shouldExclude(name: name, path: full, isHidden: isHidden, inProjectDir: inProjectDir) { continue }
             var st = stat()
-            guard lstat(full, &st) == 0 else { continue }
+            guard lstat(full, &st) == 0 else { incomplete = true; continue }
             let isDir = (st.st_mode & S_IFMT) == S_IFDIR
             // File-name exclude patterns apply to files only.
             if !isDir && rules.shouldExcludeFile(name: name) { continue }
             out.append(Entry(name: name, path: full, isDir: isDir,
-                             size: UInt64(st.st_size), mtime: Int64(st.st_mtimespec.tv_sec)))
+                             size: UInt64(max(0, st.st_size)), mtime: Int64(st.st_mtimespec.tv_sec)))
         }
-        return out
+        return (out, incomplete)
     }
 }

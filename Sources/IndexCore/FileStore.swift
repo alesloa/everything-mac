@@ -24,6 +24,10 @@ public struct FileStore: Sendable {
     public private(set) var rootID: UInt32 = .max
     public private(set) var deletedCount = 0
     public private(set) var revision: UInt64 = 0
+    /// Whether a fresh scan read every included subtree. Not persisted in cache;
+    /// share refreshes use this to avoid replacing a complete tree with partial data.
+    public private(set) var scanCompleted = true
+    mutating func markScanIncomplete() { scanCompleted = false }
     public var hasDeletions: Bool { deletedCount > 0 }
     public var baseCount: Int { base?.count ?? 0 }
     public var overlayCount: Int { parents.count }
@@ -224,15 +228,15 @@ public struct FileStore: Sendable {
     // node's name is its full path ("/" for the app's whole-disk scan, or a temp
     // base path for a scoped Scanner), so we strip that prefix before walking.
     public func idForDirPath(_ path: String) -> UInt32? {
-        guard rootID != Self.noParent else { return nil }
+        guard rootID != Self.noParent, isLive(rootID), isDir(of: rootID) else { return nil }
         let rootName = name(of: rootID)
         if path == rootName { return rootID }
-        guard path.hasPrefix(rootName) else { return nil }
+        guard rootName == "/" ? path.hasPrefix("/") : path.hasPrefix(rootName + "/") else { return nil }
         var rest = path.dropFirst(rootName.count)
         if rest.hasPrefix("/") { rest = rest.dropFirst() }   // unless rootName == "/"
         var cur = rootID
         for comp in rest.split(separator: "/", omittingEmptySubsequences: true) {
-            guard let next = childID(named: String(comp), under: cur) else { return nil }
+            guard let next = childID(named: String(comp), under: cur), isDir(of: next) else { return nil }
             cur = next
         }
         return cur
@@ -338,6 +342,7 @@ public struct FileStore: Sendable {
         try IndexCache.save(self, to: url, lastEventID: 0, rulesFingerprint: 0)
         var result = try IndexCache.load(from: url, buildWriterIndex: false).0
         result.revision = revision
+        result.scanCompleted = scanCompleted
         result.lineage = lineage
         result.compactedRevision = revision
         return result
