@@ -168,6 +168,20 @@ private final class NameCancellationBudget: @unchecked Sendable {
     }
 }
 
+@Test func obsoletePreparationsCancelAndCurrentPreparationStillCompletes() async throws {
+    let store = duplicateNameStore((0..<200_000).map { "file-\($0)-FinalReport.pdf" }, copies: 1)
+    for _ in 0..<30 {
+        let obsolete = UniqueNameIndex.Preparation(store: store)
+        obsolete.cancel()
+        obsolete.cancel() // Explicit cancellation and deinit release only once.
+        #expect(obsolete.ready() == nil)
+    }
+    let current = UniqueNameIndex.Preparation(store: store)
+    let clock = ContinuousClock(), deadline = clock.now.advanced(by: .seconds(5))
+    while current.ready() == nil && clock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+    #expect(current.ready()?.layers.reduce(0) { $0 + $1.recordNames.count } == store.count)
+}
+
 @Test func uniqueNameRealCacheBenchmark() throws {
     guard let path = ProcessInfo.processInfo.environment["UNIQUE_NAME_BENCH_CACHE"] else { return }
     let store = try IndexCache.load(from: URL(fileURLWithPath: path)).0

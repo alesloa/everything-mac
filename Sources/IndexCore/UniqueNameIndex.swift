@@ -15,21 +15,38 @@ final class UniqueNameIndex: Sendable {
     // build: queries use the per-record matcher until all its layers are ready.
     // Base builders belong to the immutable base, so frequent overlay publication
     // cannot continually cancel/restart a multi-million-name base dictionary.
-    final class Preparation: Sendable {
+    final class Preparation: @unchecked Sendable {
         private let builders: [Builder]
+        private let lock = NSLock()
+        private var released = false
 
         init(store: FileStore) {
             var builders: [Builder] = []
-            if let base = store.cachedBaseValue(key: "unique-names-preparation", build: {
-                Builder(store: store, records: 0..<store.baseCount, cachesBase: true)
-            }) { builders.append(base) }
+            if let base = store.cachedBaseValue(key: "unique-names-preparation", build: { Builder() }) {
+                base.acquire(store: store, records: 0..<store.baseCount, cachesBase: true)
+                builders.append(base)
+            }
             if store.baseCount < store.count {
-                builders.append(Builder(store: store, records: store.baseCount..<store.count, cachesBase: false))
+                let overlay = Builder()
+                overlay.acquire(store: store, records: store.baseCount..<store.count, cachesBase: false)
+                builders.append(overlay)
             }
             self.builders = builders
         }
 
+        deinit { cancel() }
+
+        func cancel() {
+            let shouldRelease = lock.withLock {
+                if released { return false }
+                released = true
+                return true
+            }
+            if shouldRelease { for builder in builders { builder.release() } }
+        }
+
         func ready() -> UniqueNameIndex? {
+            guard !lock.withLock({ released }) else { return nil }
             var layers: [Layer] = []
             for builder in builders {
                 guard let layer = builder.ready() else { return nil }
@@ -49,20 +66,85 @@ final class UniqueNameIndex: Sendable {
         }()
         private let lock = NSLock()
         private var layer: Layer?
-        private let cancellation = SearchCancellation()
+        private var leases = 0
+        private var job: Job?
 
-        init(store: FileStore, records: Range<Int>, cachesBase: Bool) {
-            let cancellation = self.cancellation
-            Self.queue.addOperation { [weak self] in
-                guard !cancellation.isCancelled else { return }
-                let build = { Layer(store: store, records: records, isCancelled: { cancellation.isCancelled }) }
-                let layer = cachesBase ? store.cachedBaseValue(key: "unique-names", build: build) : build()
-                guard let layer, !cancellation.isCancelled, let self else { return }
-                self.lock.withLock { self.layer = layer }
+        // The queue captures a weak Job, not a FileStore. Cancelling a queued job
+        // clears its input immediately, releasing obsolete mappings even while
+        // both workers are busy. A running job checks its cancellation token.
+        private final class Job: @unchecked Sendable {
+            struct Inputs: Sendable {
+                let store: FileStore
+                let records: Range<Int>
+                let cachesBase: Bool
+            }
+            let operation = BlockOperation()
+            let cancellation = SearchCancellation()
+            private let lock = NSLock()
+            private var inputs: Inputs?
+            init(store: FileStore, records: Range<Int>, cachesBase: Bool) {
+                inputs = Inputs(store: store, records: records, cachesBase: cachesBase)
+            }
+            func takeInputs() -> Inputs? {
+                lock.withLock { let previous = inputs; inputs = nil; return previous }
+            }
+            func cancel() {
+                cancellation.cancel()
+                let previous = takeInputs()
+                operation.cancel()
+                withExtendedLifetime(previous) {}
             }
         }
 
-        deinit { cancellation.cancel() }
+        func acquire(store: FileStore, records: Range<Int>, cachesBase: Bool) {
+            let started: Job? = lock.withLock {
+                leases += 1
+                guard layer == nil, job == nil else { return nil }
+                let started = Job(store: store, records: records, cachesBase: cachesBase)
+                job = started
+                return started
+            }
+            guard let started else { return }
+            started.operation.addExecutionBlock { [weak self, weak started] in
+                guard let started, let inputs = started.takeInputs() else { return }
+                let cancellation = started.cancellation
+                guard !cancellation.isCancelled else { self?.finished(nil, job: started); return }
+                let build = {
+                    let layer = Layer(store: inputs.store, records: inputs.records,
+                                      isCancelled: { cancellation.isCancelled })
+                    return cancellation.isCancelled ? nil : layer
+                }
+                let layer = inputs.cachesBase
+                    ? inputs.store.cachedBaseValue(key: "unique-names", build: build) : build()
+                self?.finished(layer, job: started)
+            }
+            Self.queue.addOperation(started.operation)
+        }
+
+        func release() {
+            let previous: Job? = lock.withLock {
+                leases -= 1
+                guard leases == 0 else { return nil }
+                let previous = job
+                job = nil
+                return previous
+            }
+            previous?.cancel()
+        }
+
+        private func finished(_ layer: Layer?, job: Job) {
+            let previous: Job? = lock.withLock {
+                // A cancelled builder may already have a new lease/job. An older
+                // completion must not overwrite that job or publish its result.
+                guard self.job === job else { return nil }
+                if !job.cancellation.isCancelled, let layer { self.layer = layer }
+                let previous = self.job
+                self.job = nil
+                return previous
+            }
+            withExtendedLifetime(previous) {}
+        }
+
         func ready() -> Layer? { lock.withLock { layer } }
     }
 
@@ -124,8 +206,12 @@ final class UniqueNameIndex: Sendable {
                 }
             }
             guard !cancelled else { return nil }
-            self.representatives = representatives
-            self.masks = masks
+            hashes = []
+            slots = []
+            // Freeze to exact-size buffers instead of retaining geometric growth
+            // capacity in the immutable dictionary for the rest of the session.
+            self.representatives = representatives.withUnsafeBufferPointer { Array($0) }
+            self.masks = masks.withUnsafeBufferPointer { Array($0) }
             self.recordNames = recordNames
             var bitmaps = [UInt64](repeating: 0, count: ((masks.count + 63) / 64) * 64)
             for (name, mask) in masks.enumerated() {
@@ -142,6 +228,9 @@ final class UniqueNameIndex: Sendable {
         }
 
         var groupCount: Int { (representatives.count + 63) / 64 }
+        var derivedByteCount: Int {
+            recordNames.capacity * 4 + representatives.capacity * 4 + masks.capacity * 8 + bitmaps.capacity * 8
+        }
 
         // Colliding character classes can admit extra names, but never discard a
         // real match. One-edit matching permits one absent class while retaining
@@ -176,7 +265,7 @@ final class UniqueNameIndex: Sendable {
     let layers: [Layer]
     var uniqueNameCount: Int { layers.reduce(0) { $0 + $1.representatives.count } }
     var derivedByteCount: Int {
-        layers.reduce(0) { $0 + $1.recordNames.count * 4 + $1.representatives.count * 12 + $1.groupCount * 512 }
+        layers.reduce(0) { $0 + $1.derivedByteCount }
     }
 
     init(store: FileStore) { layers = [Layer(store: store, records: 0..<store.count)!] }

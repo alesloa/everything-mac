@@ -12,9 +12,7 @@ extension QueryEngine {
                            isCancelled: isCancelled).map(\.id)
         }
         guard let nameIndex, candidates == nil, !query.matchPath, !query.terms.isEmpty else {
-            let allowed = candidates.map(Set.init)
-            let ids = search(query, in: store, isCancelled: isCancelled)
-            return allowed.map { allowed in ids.filter { allowed.contains($0) } } ?? ids
+            return search(query, in: store, candidates: candidates, isCancelled: isCancelled)
         }
         let terms = query.terms.map { ($0, query.caseInsensitive ? Glob.asciiLowerBytes($0) : nil) }
         let requirements = terms.map { term -> UniqueNameIndex.Requirement in
