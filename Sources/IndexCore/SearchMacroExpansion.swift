@@ -39,6 +39,7 @@ public struct SearchMacroExpansion: Sendable {
 
     public func resolve(_ state: SearchWorkspaceState) throws -> Query {
         var state = state
+        if let error = state.effectiveFilters.validationError { throw error }
         var budget = Self.maximumReferences
         if !state.regex { state.query = try expand(state.query, stack: [], budget: &budget) }
         var query = state.searchQuery
@@ -54,13 +55,14 @@ public struct SearchMacroExpansion: Sendable {
     }
 
     private func fragment(_ saved: SavedSearch, stack: [UUID], budget: inout Int) throws -> String {
+        if let error = saved.state.effectiveFilters.validationError { throw error }
         guard stack.count < Self.maximumDepth, budget > 0 else { throw SearchMacroError.expansionLimit }
         guard !stack.contains(saved.id) else { throw SearchMacroError.recursive(saved.macroName.isEmpty ? saved.name : saved.macroName) }
         budget -= 1
         let next = stack + [saved.id]
         var text = saved.state.regex ? "regex:\(Query.quotedLiteral(saved.state.query))"
             : try expand(saved.state.query, stack: next, budget: &budget)
-        text = saved.state.searchFilter.applying(to: text)
+        text = saved.state.effectiveFilters.applying(to: text)
         if let id = saved.state.customFilterID {
             guard let filter = savedSearches.first(where: { $0.id == id && $0.isCustomFilter }) else { throw SearchMacroError.missingFilter }
             let addition = try fragment(filter, stack: next, budget: &budget)

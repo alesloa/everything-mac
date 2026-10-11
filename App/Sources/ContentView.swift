@@ -26,21 +26,8 @@ struct ContentView: View {
                 .background(.yellow.opacity(0.2))
                 Divider()
             }
-            SearchField(text: $model.query, matchPath: $model.matchPath, fuzzy: $model.fuzzy,
-                        wholeWord: model.wholeWord, focused: $searchFocused, onChange: { model.queryChanged() },
-                        fuzzyAvailable: !(model.regex || model.matchPrefix || model.matchSuffix))
+            SearchField(text: $model.query, focused: $searchFocused, onChange: { model.queryChanged() }, model: model)
             WorkspaceTabBar()
-            HStack {
-                // Source: the built-in SearchFilter definitions and the owner's
-                // approved advanced-search addition.
-                Picker("Filter", selection: Binding(get: { model.searchFilter }, set: {
-                    model.searchFilter = $0; model.searchOptionsChanged()
-                })) {
-                    ForEach(SearchFilter.allCases, id: \.self) { Text($0.title).tag($0) }
-                }.frame(width: 210)
-                Button("Advanced…") { model.activePanel = .advancedSearch }
-                Spacer()
-            }.padding(.horizontal, 8).padding(.bottom, 6)
             if let error = model.searchError {
                 // Source: Query.validationError for the entered query.
                 Text(error).foregroundStyle(.red).textSelection(.enabled)
@@ -48,6 +35,12 @@ struct ContentView: View {
             }
             Divider()
             SearchResultsArea(model: model)
+            if model.selectionLoading {
+                // Source: the running task resolves the complete selected row ranges.
+                HStack { ProgressView().controlSize(.small); Text("Loading selection…"); Spacer()
+                    Button("Cancel") { model.cancelSelectionResolution() }
+                }.padding(8)
+            }
             if ResultActions.state.isBusy {
                 HStack {
                     // Source: the running task represented by FileActionState.isBusy.
@@ -58,8 +51,9 @@ struct ContentView: View {
                 }.padding(8)
             }
             Divider()
-            StatusBar(total: model.total, shown: model.results.count, scanning: model.scanning,
-                      shares: model.shares, matches: model.totalMatches)
+            StatusBar(total: model.total, scanning: model.scanning,
+                      shares: model.shares, matches: model.totalMatches, ordering: model.resultOrdering,
+                      selected: model.selectionCount)
         }
         .background(.regularMaterial)
         .onAppear { searchFocused = true }
@@ -77,7 +71,7 @@ struct ContentView: View {
             case .advancedSearch:
                 AdvancedSearchView(initialQuery: advancedInitialQuery,
                 onApply: {
-                    model.query = $0; model.regex = false; model.searchFilter = .all
+                    model.query = $0; model.regex = false; model.searchFilters = SearchFilters()
                     model.activePanel = nil; model.queryChanged()
                 }, onCancel: { model.activePanel = nil })
             case .bookmarks: SavedSearchesView()
@@ -94,20 +88,21 @@ struct ContentView: View {
                 switch model.featureQueryResult {
                 case .success(let query):
                     NativeResultsExportView(index: model.index.searchIndex, query: query,
-                        selected: model.actionRecords, shown: model.results,
-                        sort: model.sortKey, ascending: model.ascending, folderPath: model.folderScope?.path)
+                        selected: model.actionRecords, shown: model.visibleResults,
+                        sort: model.sortKey, ascending: model.ascending, folderPath: model.folderScope?.path,
+                        selection: model.rowSelection)
                 case .failure(let error): featureError(error)
                 }
             case .duplicates:
                 if case .failure(let error) = model.featureQueryResult { featureError(error) }
                 DuplicateFinderView(index: model.index.searchIndex,
-                    query: try? model.featureQueryResult.get(), selectedPaths: model.actionRecords.map(\.path),
+                    query: try? model.featureQueryResult.get(), selectedPaths: (model.panelRecords ?? model.actionRecords).map(\.path),
                     folderPath: model.folderScope?.path)
             case .contentSearch:
                 switch model.featureQueryResult {
                 case .success(let query):
                     ContentSearchView(index: model.index.searchIndex,
-                        query: query, selectedPaths: model.actionRecords.map(\.path),
+                        query: query, selectedPaths: (model.panelRecords ?? model.actionRecords).map(\.path),
                         folderPath: model.folderScope?.path)
                 case .failure(let error): featureError(error)
                 }

@@ -7,21 +7,21 @@ struct FileActionCommands: Commands {
 
     var body: some Commands {
         CommandGroup(after: .newItem) {
-            Button("Rename…") { ResultActions.rename(model.actionRecords) }
-                .disabled(model.actionRecords.isEmpty || ResultActions.state.isBusy)
-            Button("Get Info") { ResultActions.getInfo(model.actionRecords) }
+            Button("Rename…") { model.performSelected(.rename) }
+                .disabled(model.selectionCount == 0 || model.selectionLoading || ResultActions.state.isBusy)
+            Button("Get Info") { model.performSelected(.getInfo) }
                 .keyboardShortcut("i", modifiers: .command)
-                .disabled(model.actionRecords.isEmpty)
-            Button("Copy To…") { ResultActions.copyTo(model.actionRecords) }
-                .disabled(model.actionRecords.isEmpty || ResultActions.state.isBusy)
-            Button("Move To…") { ResultActions.moveTo(model.actionRecords) }
-                .disabled(model.actionRecords.isEmpty || ResultActions.state.isBusy)
+                .disabled(model.selectionCount == 0 || model.selectionLoading)
+            Button("Copy To…") { model.performSelected(.copyTo) }
+                .disabled(model.selectionCount == 0 || model.selectionLoading || ResultActions.state.isBusy)
+            Button("Move To…") { model.performSelected(.moveTo) }
+                .disabled(model.selectionCount == 0 || model.selectionLoading || ResultActions.state.isBusy)
         }
         CommandGroup(after: .pasteboard) {
-            Button("Copy Files") { ResultActions.copyFiles(model.actionRecords) }
+            Button("Copy Files") { model.performSelected(.copyFiles) }
                 .keyboardShortcut("c", modifiers: [.command, .option])
-                .disabled(model.actionRecords.isEmpty)
-            Button("Paste Files…") { ResultActions.pasteFiles(into: model.selected) }
+                .disabled(model.selectionCount == 0 || model.selectionLoading)
+            Button("Paste Files…") { ResultActions.pasteFiles(into: model.selectionCount == 1 ? model.selected : nil) }
                 .keyboardShortcut("v", modifiers: [.command, .option])
                 .disabled(!ResultActions.canPasteFiles || ResultActions.state.isBusy)
         }
@@ -29,8 +29,8 @@ struct FileActionCommands: Commands {
             Button("Undo File Operation") { ResultActions.undoLastOperation() }
                 .keyboardShortcut("z", modifiers: [.command, .option])
                 .disabled(!ResultActions.state.canUndo || ResultActions.state.isBusy)
-            Button("Cancel File Operation") { ResultActions.state.cancel() }
-                .disabled(!ResultActions.state.isBusy)
+            Button("Cancel File Operation") { model.cancelSelectionResolution(); ResultActions.state.cancel() }
+                .disabled(!ResultActions.state.isBusy && !model.selectionLoading)
         }
     }
 }

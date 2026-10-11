@@ -8,6 +8,7 @@ final class AppModel: ObservableObject {
     @Published var query = ""
     @Published var results: [FileRecord] = [] {
         didSet {
+            guard resultList == nil else { return }
             let recordsByID = Dictionary(results.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             selectedRecords = selectedRecords.compactMap { selected in
                 guard let current = recordsByID[selected.id],
@@ -19,6 +20,29 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    @Published var resultList: SearchResultList? {
+        didSet {
+            if oldValue !== resultList { oldValue?.cancel(); resultOrdering = false }
+        }
+    }
+    @Published var rowSelection: SearchRowSelection?
+    @Published var selectionLoading = false
+    var selectionGeneration = 0
+    var selectionResolution: Task<Void, Never>?
+    private var pendingResultList: SearchResultList?
+    private var indexRefreshTask: Task<Void, Never>?
+    private var indexRefreshPending = false
+    private var explicitSearches = 0
+    private struct DisplayedSearch: Equatable {
+        let query: Query
+        let sort: QueryEngine.SortKey
+        let ascending: Bool
+        let scope: FolderScope?
+    }
+    private var displayedSearch: DisplayedSearch?
+    var panelRecords: [FileRecord]?
+    @Published var visibleResults: [FileRecord] = []
+    @Published var resultOrdering = false
     @Published var total = 0
     @Published var indexRevision: UInt64 = 0
     @Published var totalMatches: Int?
@@ -38,7 +62,12 @@ final class AppModel: ObservableObject {
     @Published var matchSuffix = false
     @Published var ignorePunctuation = false
     @Published var ignoreWhitespace = false
-    @Published var searchFilter: SearchFilter = .all
+    @Published var searchFilters = SearchFilters()
+    // Compatibility for older single-filter preferences and advanced-search forms.
+    var searchFilter: SearchFilter {
+        get { searchFilters.types.count == 1 ? searchFilters.types.first ?? .all : .all }
+        set { searchFilters.types = newValue == .all ? [] : [newValue] }
+    }
     @Published var searchError: String?
     @Published var activePanel: AppFeaturePanel?
     @Published var previewVisible = false
@@ -50,13 +79,17 @@ final class AppModel: ObservableObject {
     @Published var indexedTotalsColumnOverride: Bool?
     lazy var folderDetails = FolderDetailsModel(index: index.searchIndex)
     @Published var selectedRecords: [FileRecord] = []
-    // Max rows handed to the table — the old hardcoded 5000 cap, now user-tunable.
+    // Retained for archived workspace/catalog compatibility; native rows are virtual.
     @Published var resultLimit = 5000
     @Published var rules: ExcludeRules = .defaults
     @Published var scanning = false
     @Published var shares: [NetworkShareStatus] = []
     @Published var selectedID: UInt32? {
-        didSet { selectedPath = selectedID.flatMap { id in results.first { $0.id == id }?.path } }
+        didSet {
+            selectedPath = selectedID.flatMap { id in
+                (selectedRecords.first { $0.id == id } ?? results.first { $0.id == id })?.path
+            }
+        }
     }
     private var selectedPath: String?
     // Bumped to ask the focused window to put the cursor in the search field (⌘F /
@@ -70,12 +103,14 @@ final class AppModel: ObservableObject {
     // ID and path so selection-dependent commands retain the same file target.
     var selected: FileRecord? {
         guard let id = selectedID, let path = selectedPath else { return nil }
-        return results.first { $0.id == id && $0.path.utf8.elementsEqual(path.utf8) }
+        return selectedRecords.first { $0.id == id && $0.path.utf8.elementsEqual(path.utf8) }
+            ?? results.first { $0.id == id && $0.path.utf8.elementsEqual(path.utf8) }
     }
 
     var actionRecords: [FileRecord] {
         selectedRecords.isEmpty ? selected.map { [$0] } ?? [] : selectedRecords
     }
+    var selectionCount: Int { rowSelection?.count ?? actionRecords.count }
 
     let index: IndexActor
     let preferences: UserDefaults
@@ -159,7 +194,7 @@ final class AppModel: ObservableObject {
         background.$indexRevision.sink { [weak self] revision in
             self?.indexRevision = revision
             self?.refreshFolderDetailsIfNeeded()
-            Task { @MainActor [weak self] in await self?.runSearch() }
+            self?.refreshResultsFromIndex()
         }.store(in: &backgroundSubscriptions)
     }
 
@@ -257,16 +292,18 @@ final class AppModel: ObservableObject {
     func onScanProgress(_ count: Int, scanID: UUID) {
         guard scanning, activeScanID == scanID else { return }
         total = count
-        // No live search here: during the initial build the actor serves the OLD
-        // index, so re-searching every tick just churns. Results refresh once when
-        // the scan completes (bootstrap/applyRules call runSearch afterward).
+        // Searchable scan batches notify liveRefresh separately. Count-only ticks
+        // do not repeat a query against an unchanged publication.
     }
 
     func queryChanged() {
+        rowSelection = nil; selectedRecords = []; selectedID = nil; selectionGeneration &+= 1
         savePrefs()   // also captures a Match-path toggle (shares this entry point)
         workspaceStateChanged()
         task?.cancel()
         searchTask?.cancel()
+        resultList?.cancel()
+        pendingResultList?.cancel()
         searchSeq &+= 1
         task = Task {
             try? await Task.sleep(nanoseconds: 40_000_000) // debounce 40ms
@@ -284,28 +321,36 @@ final class AppModel: ObservableObject {
         sortKey = key; ascending = asc; savePrefs(); Task { await runSearch() }
     }
 
-    func runSearch() async {
+    func runSearch(preservingOrder: Bool = false) async {
         guard !Task.isCancelled else { return }
+        if !preservingOrder { explicitSearches += 1 }
+        defer { if !preservingOrder { explicitSearches -= 1 } }
         searchTask?.cancel()
+        pendingResultList?.cancel(); pendingResultList = nil
         searchSeq &+= 1
         let mySeq = searchSeq
         let query: Query
         do { query = try resolvedWorkspaceQuery() }
         catch {
             // Source: the saved-query expansion's actual error for this workspace.
-            searchError = error.localizedDescription; results = []; totalMatches = 0; resultSnapshotID = nil; return
+            searchError = error.localizedDescription; rowSelection = nil; resultList = nil; results = []
+            totalMatches = 0; resultSnapshotID = nil; return
         }
         if let error = query.validationError {
             // Source: the parser's validation error for the owner's entered query.
             searchError = error.localizedDescription
+            rowSelection = nil
+            resultList = nil
             results = []
             totalMatches = 0; resultSnapshotID = nil
             return
         }
         searchError = nil
-        let sort = sortKey, ascending = ascending, limit = resultLimit, scope = folderScope
+        let sort = sortKey, ascending = ascending, scope = folderScope
+        let presentation = DisplayedSearch(query: query, sort: sort, ascending: ascending, scope: scope)
         let worker = Task {
-            await index.searchIndex.searchReport(query, sort: sort, ascending: ascending, limit: limit, scope: scope)
+            await index.searchIndex.searchReport(query, sort: sort, ascending: ascending,
+                                                 limit: 5000, scope: scope, includeAllResults: true)
         }
         searchTask = worker
         let r = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
@@ -313,11 +358,34 @@ final class AppModel: ObservableObject {
         // in-flight search (e.g. from a live-refresh tick) clobbering newer
         // results with a stale sort order.
         if mySeq == searchSeq && !Task.isCancelled && !worker.isCancelled {
+            pendingResultList = r.resultList
+            if preservingOrder, displayedSearch == presentation, resultList?.hasStartedOrdering == true, let next = r.resultList {
+                guard await next.prepare(), mySeq == searchSeq, !Task.isCancelled else { next.cancel(); return }
+            }
+            var mapped: SearchRowSelection?
+            var selection: [FileRecord] = []
+            while true {
+                let generation = selectionGeneration
+                mapped = nil
+                if let previous = rowSelection, let next = r.resultList {
+                    mapped = await previous.retaining(in: next)
+                    selection = mapped?.preview ?? []
+                } else { selection = await r.resultList?.retaining(actionRecords) ?? [] }
+                guard mySeq == searchSeq, !Task.isCancelled else { r.resultList?.cancel(); return }
+                if generation == selectionGeneration { break }
+            }
+            resultList = r.resultList
+            displayedSearch = presentation
+            pendingResultList = nil
+            rowSelection = mapped
             results = r.records
+            visibleResults = []
+            resultOrdering = false
+            selectedRecords = selection; selectedID = selection.first?.id
             totalMatches = r.totalMatches
             resultSnapshotID = r.snapshotID
             recordCompletedWorkspaceSearch()
-        }
+        } else { r.resultList?.cancel() }
     }
 
     // Coalesce bursts of FSEvents into at most one refresh per 200ms.
@@ -328,7 +396,22 @@ final class AppModel: ObservableObject {
             if Task.isCancelled { return }
             if !scanning { total = index.totalCount }
             indexDidChange()
-            await runSearch()
+            refreshResultsFromIndex()
+        }
+    }
+
+    func refreshResultsFromIndex() {
+        indexRefreshPending = true
+        guard indexRefreshTask == nil else { return }
+        indexRefreshTask = Task { [weak self] in
+            while self?.indexRefreshPending == true && !Task.isCancelled {
+                if (self?.explicitSearches ?? 0) > 0 {
+                    try? await Task.sleep(for: .milliseconds(10)); continue
+                }
+                self?.indexRefreshPending = false
+                await self?.runSearch(preservingOrder: true)
+            }
+            self?.indexRefreshTask = nil
         }
     }
 
@@ -350,6 +433,15 @@ final class AppModel: ObservableObject {
     }
 
     func focusSearch() { focusSearchSignal &+= 1 }
+
+    func setVisibleResults(_ records: [FileRecord]) {
+        if visibleResults != records { visibleResults = records }
+    }
+
+    func setResultOrdering(_ listID: UUID, _ loading: Bool) {
+        guard resultList?.id == listID, resultOrdering != loading else { return }
+        resultOrdering = loading
+    }
 
     func setFolderScope(_ scope: FolderScope?) {
         folderScope = scope
@@ -378,6 +470,14 @@ final class AppModel: ObservableObject {
     }
 
     func selectRecords(_ records: [FileRecord]) {
+        rowSelection = nil; selectionGeneration &+= 1
+        if resultList != nil {
+            // Source: the active table/collection decodes these picks from its immutable result list.
+            selectedRecords = records
+            selectedID = records.first?.id
+            updateQuickLookSelection()
+            return
+        }
         let recordsByID = Dictionary(results.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         selectedRecords = records.filter { selected in
             recordsByID[selected.id]?.path.utf8.elementsEqual(selected.path.utf8) == true
@@ -398,7 +498,7 @@ final class AppModel: ObservableObject {
               regex: regex, diacriticInsensitive: diacriticInsensitive,
               matchPrefix: matchPrefix, matchSuffix: matchSuffix,
               ignorePunctuation: ignorePunctuation, ignoreWhitespace: ignoreWhitespace)
-        return searchFilter.applying(to: base)
+        return searchFilters.applying(to: base)
     }
 
     var featureQueryResult: Result<Query, Error> {
@@ -427,6 +527,8 @@ final class AppModel: ObservableObject {
         if let name = d.string(forKey: "pref.searchFilter"), let filter = SearchFilter(rawValue: name) {
             searchFilter = filter
         }
+        if let data = d.data(forKey: "pref.searchFilters"),
+           let filters = try? JSONDecoder().decode(SearchFilters.self, from: data) { searchFilters = filters }
         previewVisible = d.bool(forKey: "pref.previewVisible")
         thumbnailView = d.bool(forKey: "pref.thumbnailView")
         previewAllowsNetwork = d.bool(forKey: "pref.previewAllowsNetwork")
@@ -453,6 +555,7 @@ final class AppModel: ObservableObject {
         d.set(ignorePunctuation, forKey: "pref.ignorePunctuation")
         d.set(ignoreWhitespace, forKey: "pref.ignoreWhitespace")
         d.set(searchFilter.rawValue, forKey: "pref.searchFilter")
+        if let data = try? JSONEncoder().encode(searchFilters) { d.set(data, forKey: "pref.searchFilters") }
         d.set(previewVisible, forKey: "pref.previewVisible")
         d.set(thumbnailView, forKey: "pref.thumbnailView")
         d.set(previewAllowsNetwork, forKey: "pref.previewAllowsNetwork")

@@ -10,15 +10,12 @@ struct SearchFeatureCommands: Commands {
         CommandMenu("Search") {
             Button("Advanced Search…") { model.activePanel = .advancedSearch }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
-            Menu("Filter") {
-                Picker("Filter", selection: Binding(get: { model.searchFilter }, set: {
-                    model.searchFilter = $0; model.searchOptionsChanged()
-                })) {
-                    ForEach(SearchFilter.allCases, id: \.self) { filter in
-                        Text(filter.title).tag(filter)
-                    }
+            Menu("Filters") {
+                Button("Everything") { model.setSearchFilters(SearchFilters()) }
+                ForEach(SearchFilter.allCases.filter { $0 != .all }, id: \.self) { filter in
+                    Toggle(filter.title, isOn: Binding(get: { model.searchFilters.types.contains(filter) },
+                        set: { _ in model.toggleSearchFilter(filter) }))
                 }
-                .pickerStyle(.inline)
             }
             Divider()
             Toggle("Regular Expressions", isOn: option(\.regex))
@@ -29,8 +26,8 @@ struct SearchFeatureCommands: Commands {
             Toggle("Ignore Whitespace", isOn: option(\.ignoreWhitespace))
         }
         CommandMenu("Tools") {
-            Button("Find Duplicates…") { model.activePanel = .duplicates }
-            Button("Search File Contents…") { model.activePanel = .contentSearch }
+            Button("Find Duplicates…") { model.openSelectedPanel(.duplicates) }
+            Button("Search File Contents…") { model.openSelectedPanel(.contentSearch) }
             Button("File Catalogs…") { model.activePanel = .catalogs }
             Divider()
             Button("Index Activity…") { model.activePanel = .activity }

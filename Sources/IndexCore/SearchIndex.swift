@@ -45,13 +45,14 @@ public final class SearchIndex: @unchecked Sendable {
 
     public func searchReport(_ query: Query, sort: QueryEngine.SortKey = .relevance,
                              ascending: Bool = true, limit: Int = 5000,
-                             scope: FolderScope? = nil) async -> SearchReport {
+                             scope: FolderScope? = nil, includeAllResults: Bool = false) async -> SearchReport {
         let query = query.refreshingRelativeDates()
         let snapshot = lock.withLock { current }
         let cancellation = SearchCancellation()
         return await withTaskCancellationHandler {
             let worker = Task.detached(priority: .userInitiated) {
                 snapshot.search(query, sort: sort, ascending: ascending, limit: limit, scope: scope,
+                                includeAllResults: includeAllResults,
                                 isCancelled: { cancellation.isCancelled })
             }
             return await worker.value
@@ -119,7 +120,8 @@ public final class SearchIndex: @unchecked Sendable {
         }
 
         func search(_ query: Query, sort: QueryEngine.SortKey, ascending: Bool, limit: Int,
-                    scope: FolderScope?, isCancelled: @escaping @Sendable () -> Bool) -> SearchReport {
+                    scope: FolderScope?, includeAllResults: Bool,
+                    isCancelled: @escaping @Sendable () -> Bool) -> SearchReport {
             let empty = SearchReport(records: [], totalMatches: 0, snapshotID: id, revision: store.revision)
             guard !isCancelled() else { return empty }
             let engine = QueryEngine()
@@ -197,8 +199,33 @@ public final class SearchIndex: @unchecked Sendable {
                                           mtime: store.mtime(of: id), isDir: store.isDir(of: id),
                                           volID: store.volID(of: id)))
             }
+            let list = includeAllResults ? SearchResultList(store: store, snapshotID: id,
+                matchingIDs: displayedMatches.ids, initialIDs: sorted, ordering: { [store] cancelled in
+                    switch displayedMatches {
+                    case .fuzzy(let scored) where sort == .relevance:
+                        return engine.rankedPrefix(scored, limit: totalMatches, bestFirst: ascending,
+                                                   in: store, isCancelled: cancelled)
+                    case .fuzzy(let scored):
+                        return engine.sortedPrefix(scored.map(\.id), by: sort, ascending: ascending,
+                                                   limit: totalMatches, in: store, isCancelled: cancelled)
+                    case .exact(let ids):
+                        return engine.sortedPrefix(ids, by: sort, ascending: ascending,
+                                                   limit: totalMatches, in: store, isCancelled: cancelled)
+                    }
+                }, trailing: { [store] cancelled in
+                    switch displayedMatches {
+                    case .fuzzy(let scored) where sort == .relevance:
+                        return engine.rankedSuffix(scored, limit: 512, bestFirst: ascending, in: store, isCancelled: cancelled)
+                    case .fuzzy(let scored):
+                        return engine.sortedSuffix(scored.map(\.id), by: sort, ascending: ascending,
+                                                   limit: 512, in: store, isCancelled: cancelled)
+                    case .exact(let ids):
+                        return engine.sortedSuffix(ids, by: sort, ascending: ascending,
+                                                   limit: 512, in: store, isCancelled: cancelled)
+                    }
+                }) : nil
             return SearchReport(records: records, totalMatches: totalMatches,
-                                snapshotID: id, revision: store.revision)
+                                snapshotID: id, revision: store.revision, resultList: list)
         }
     }
 }

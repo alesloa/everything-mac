@@ -1,13 +1,11 @@
 import SwiftUI
+import IndexCore
 
 struct SearchField: View {
     @Binding var text: String
-    @Binding var matchPath: Bool
-    @Binding var fuzzy: Bool
-    var wholeWord: Bool
     var focused: FocusState<Bool>.Binding
     var onChange: () -> Void
-    var fuzzyAvailable = true
+    @ObservedObject var model: AppModel
     var body: some View {
         HStack {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -15,13 +13,13 @@ struct SearchField: View {
                 .textFieldStyle(.plain).font(.system(size: 15))
                 .focused(focused)
                 .onChange(of: text) { onChange() }
-            Toggle("Match path", isOn: $matchPath).toggleStyle(.switch)
-                .onChange(of: matchPath) { onChange() }
-            // Source: the owner's request for fuzzy file search; the switch reflects
-            // the persisted AppModel search option, never inferred file metadata.
-            Toggle("Fuzzy", isOn: $fuzzy).toggleStyle(.switch)
-                .disabled(wholeWord || !fuzzyAvailable)
-                .onChange(of: fuzzy) { onChange() }
+            if !text.isEmpty {
+                // Source: this application's clear-search action resets the entered query.
+                Button { text = "" } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .help("Clear search").accessibilityLabel("Clear search")
+            }
+            SearchFiltersButton(model: model, workspace: model.workspace)
         }
         .padding(8)
     }

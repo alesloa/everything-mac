@@ -16,11 +16,16 @@ public enum ParallelScanner {
         private let lock = NSLock()
         private var lastReported = 0
         private let progress: (@Sendable (Int) -> Void)?
+        private let onSnapshot: (@Sendable (FileStore) -> Void)?
+        private var publishedCount = 0
+        private var publishedAt = ContinuousClock.now
         private let volID: UInt32
 
-        init(volID: UInt32, progress: (@Sendable (Int) -> Void)?) {
+        init(volID: UInt32, progress: (@Sendable (Int) -> Void)?,
+             onSnapshot: (@Sendable (FileStore) -> Void)?) {
             self.volID = volID
             self.progress = progress
+            self.onSnapshot = onSnapshot
         }
 
         func appendRoot(name: String, size: UInt64, mtime: Int64) -> UInt32 {
@@ -51,8 +56,17 @@ public enum ParallelScanner {
             let count = store.count
             let crossed = count / 50_000 != lastReported / 50_000
             lastReported = count
+            // Throttle both time and growth: sharing every directory would make
+            // copy-on-write repeatedly duplicate a multi-million-record arena.
+            let now = ContinuousClock.now
+            let publish = onSnapshot != nil && count > publishedCount && (publishedCount == 0 ||
+                (now - publishedAt >= .seconds(2) && count - publishedCount >= max(1000, publishedCount / 5)) ||
+                now - publishedAt >= .seconds(5))
+            let snapshot = publish ? store.storageSnapshot() : nil
+            if publish { publishedCount = count; publishedAt = now }
             lock.unlock()
             if crossed { progress?(count) }
+            if let snapshot { onSnapshot?(snapshot) }
             return ids
         }
 
@@ -100,9 +114,11 @@ public enum ParallelScanner {
     /// so call it from a detached task, never on the actor.
     public static func scanWholeDisk(rules: ExcludeRules,
                                      isCancelled: @escaping @Sendable () -> Bool = { false },
-                                     progress: (@Sendable (Int) -> Void)? = nil) -> FileStore {
+                                     progress: (@Sendable (Int) -> Void)? = nil,
+                                     onSnapshot: (@Sendable (FileStore) -> Void)? = nil) -> FileStore {
         scan(root: "/", rules: rules, volID: 1,
-             workers: max(2, ProcessInfo.processInfo.activeProcessorCount), isCancelled: isCancelled, progress: progress)
+             workers: max(2, ProcessInfo.processInfo.activeProcessorCount), isCancelled: isCancelled,
+             progress: progress, onSnapshot: onSnapshot)
     }
 
     /// Scan one directory tree into its own FileStore, rooted at `root` (stored as
@@ -112,12 +128,13 @@ public enum ParallelScanner {
     /// failures retain the readable portion and set `scanCompleted` to false.
     public static func scan(root: String, rules: ExcludeRules, volID: UInt32, workers: Int,
                             isCancelled: @escaping @Sendable () -> Bool = { false },
-                            progress: (@Sendable (Int) -> Void)? = nil) -> FileStore {
+                            progress: (@Sendable (Int) -> Void)? = nil,
+                            onSnapshot: (@Sendable (FileStore) -> Void)? = nil) -> FileStore {
         guard !isCancelled() else { return FileStore() }
         let rootName = Scanner.normalizedRoot(root)
         guard let rootEntries = readDirectory(rootName, root: rootName, rules: rules, isCancelled: isCancelled),
               let metadata = rootEntries.rootMetadata else { return FileStore() }
-        let builder = Builder(volID: volID, progress: progress)
+        let builder = Builder(volID: volID, progress: progress, onSnapshot: onSnapshot)
         let rootID = builder.appendRoot(name: rootName, size: metadata.size, mtime: metadata.mtime)
         if rootEntries.incomplete { builder.markIncomplete(rootID) }
         let ids = builder.appendChildren(rootEntries.entries, parent: rootID, isCancelled: isCancelled)

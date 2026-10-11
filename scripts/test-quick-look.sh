@@ -8,7 +8,7 @@ swiftc -O -swift-version 6 -strict-concurrency=complete -warnings-as-errors -par
     -I .build/release/Modules \
     App/Sources/PreviewFileAccess.swift App/Sources/PreviewPane.swift \
     App/Sources/QuickLookController.swift App/Sources/ThumbnailService.swift \
-    App/Sources/ThumbnailResultsView.swift App/Sources/ResultsTable.swift \
+    App/Sources/ThumbnailResultsView.swift App/Sources/ResultsGridLayout.swift App/Sources/ResultsTable.swift App/Sources/ResultsTableVirtualRows.swift App/Sources/ResultSelectionAction.swift \
     App/Sources/ResultsColumnLayout.swift App/Sources/ResultsTableColumns.swift App/Sources/ResultsTableHighlights.swift \
     App/Sources/SelectionIdentity.swift App/Sources/ResultActions.swift App/Sources/FileIcons.swift \
     App/Sources/FileOperations.swift App/Sources/FileActionState.swift \

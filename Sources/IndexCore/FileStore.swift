@@ -38,6 +38,7 @@ public struct FileStore: Sendable {
         count > 0 && (base == nil || overlayCount >= max(4_096, min(50_000, baseCount / 20)) || deletedWords.count >= max(256, min(4_096, baseCount / 512)))
     }
     public init() {}
+    func sharesSlots(with other: FileStore) -> Bool { lineage == other.lineage }
 
     func cachedBaseValue<Value: Sendable>(key: String, build: () -> Value?) -> Value? {
         base?.cachedValue(key: key, build: build)

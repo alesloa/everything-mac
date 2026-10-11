@@ -33,12 +33,12 @@ struct AppCommands: Commands {
         // FILE — act on the selected result, plus index/export actions.
         CommandGroup(after: .newItem) {
             Divider()
-            Button("Open") { ResultActions.open(model.actionRecords) }
+            Button("Open") { model.performSelected(.open) }
                 .keyboardShortcut("o", modifiers: .command)
-                .disabled(model.actionRecords.isEmpty)
-            Button("Reveal in Finder") { ResultActions.reveal(model.actionRecords) }
+                .disabled(model.selectionCount == 0 || model.selectionLoading)
+            Button("Reveal in Finder") { model.performSelected(.reveal) }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
-                .disabled(model.actionRecords.isEmpty)
+                .disabled(model.selectionCount == 0 || model.selectionLoading)
             Divider()
             Button("Export Results…") { model.activePanel = .export }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
@@ -50,18 +50,18 @@ struct AppCommands: Commands {
             // No keyboard shortcut on purpose: ⌘⌫ is "delete to start of line" while
             // the search field is focused, so binding it here would risk trashing a
             // file mid-type. Click-only keeps a destructive action deliberate.
-            Button("Move to Trash") { ResultActions.trash(model.actionRecords) }
-                .disabled(model.actionRecords.isEmpty || ResultActions.state.isBusy)
+            Button("Move to Trash") { model.performSelected(.trash) }
+                .disabled(model.selectionCount == 0 || model.selectionLoading || ResultActions.state.isBusy)
         }
 
         // EDIT — copy path/name of the selection, after the standard clipboard group.
         CommandGroup(after: .pasteboard) {
             Divider()
-            Button("Copy Path") { ResultActions.copyPath(model.actionRecords) }
+            Button("Copy Path") { model.performSelected(.copyPath) }
                 .keyboardShortcut("c", modifiers: [.command, .shift])
-                .disabled(model.actionRecords.isEmpty)
-            Button("Copy Name") { ResultActions.copyName(model.actionRecords) }
-                .disabled(model.actionRecords.isEmpty)
+                .disabled(model.selectionCount == 0 || model.selectionLoading)
+            Button("Copy Name") { model.performSelected(.copyName) }
+                .disabled(model.selectionCount == 0 || model.selectionLoading)
         }
         CommandGroup(after: .textEditing) {
             Button("Find") { model.focusSearch() }

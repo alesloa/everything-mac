@@ -6,6 +6,7 @@ public struct SearchReport: Sendable {
     public let totalMatches: Int
     public let snapshotID: UUID
     public let revision: UInt64
+    public var resultList: SearchResultList? = nil
 }
 
 public struct FolderScope: Sendable, Equatable {

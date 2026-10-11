@@ -1,6 +1,18 @@
 import Foundation
 
 extension CatalogIO {
+    @discardableResult
+    public static func exportSelection(_ selection: SearchRowSelection, to url: URL, format: CatalogFormat,
+                                       isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> Int {
+        let namespace = UUID()
+        return try exportStream(to: url, format: format, isCancelled: isCancelled) { emit in
+            for row in selection.rows {
+                if isCancelled() { throw CancellationError() }
+                guard let record = selection.list.record(at: row) else { throw CancellationError() }
+                try emit(CatalogRecord(native: record, catalogID: namespace))
+            }
+        }
+    }
     /// Exports exactly these visible/selected rows in their supplied order.
     @discardableResult
     public static func exportRows(_ rows: [CatalogRecord], to url: URL, format: CatalogFormat,

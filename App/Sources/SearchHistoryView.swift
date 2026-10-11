@@ -24,11 +24,11 @@ private struct SearchHistoryLibraryView: View {
                 ForEach(library.archive.history.filter { search.isEmpty || $0.state.query.localizedCaseInsensitiveContains(search) }) { entry in
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(entry.state.query.isEmpty ? entry.state.searchFilter.title : entry.state.query).lineLimit(2)
+                            Text(entry.state.query.isEmpty ? model.filterSummary(for: entry.state) : entry.state.query).lineLimit(2)
                             Text(entry.completedAt, format: .dateTime).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text(entry.state.searchFilter.title).foregroundStyle(.secondary)
+                        Text(model.filterSummary(for: entry.state)).foregroundStyle(.secondary).lineLimit(2)
                     }.tag(entry.id)
                         .onTapGesture(count: 2) { model.openHistorySearch(entry) }
                         .contextMenu {

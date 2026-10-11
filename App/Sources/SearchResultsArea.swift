@@ -34,7 +34,9 @@ struct SearchResultsArea: View {
                     ThumbnailResultsView(rows: model.results, selectedRecords: model.actionRecords,
                         onSelection: model.selectRecords, onActivate: { ResultActions.open($0) },
                         onPreview: { QuickLookController.shared.toggle($0, allowsNetwork: model.previewAllowsNetwork) },
-                        allowsNetwork: model.previewAllowsNetwork)
+                        allowsNetwork: model.previewAllowsNetwork, resultList: model.resultList,
+                        onVisibleRows: model.setVisibleResults, onOrdering: model.setResultOrdering,
+                        selectedRows: model.rowSelection, onRowSelection: model.selectRows, onRowAction: model.performRows)
                 } else {
                     ResultsTable(rows: model.results,
                         onSort: { model.setSort($0, ascending: $1) },
@@ -44,7 +46,10 @@ struct SearchResultsArea: View {
                         selectedRecords: model.actionRecords, query: try? model.featureQueryResult.get(),
                         folderTotals: totals, sortKey: model.sortKey, ascending: model.ascending,
                         showIndexedTotals: model.indexedTotalsColumnOverride,
-                        onIndexedTotalsVisibilityChanged: model.indexedColumnsChanged)
+                        onIndexedTotalsVisibilityChanged: model.indexedColumnsChanged,
+                        resultList: model.resultList, onVisibleRows: model.setVisibleResults,
+                        onOrdering: model.setResultOrdering, selectedRows: model.rowSelection,
+                        onRowSelection: model.selectRows, onRowAction: model.performRows)
                 }
             }.frame(minWidth: 250)
             if model.previewVisible {

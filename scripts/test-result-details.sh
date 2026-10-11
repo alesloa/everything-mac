@@ -6,7 +6,7 @@ result_details_dir="$(mktemp -d "${TMPDIR:-/tmp}/everything-result-details.XXXXX
 trap 'rm -rf "$result_details_dir"' EXIT
 swiftc -O -swift-version 6 -strict-concurrency=complete -warnings-as-errors -parse-as-library \
     -I .build/release/Modules \
-    App/Sources/ResultsTable.swift App/Sources/ResultsColumnLayout.swift \
+    App/Sources/ResultsTable.swift App/Sources/ResultsTableVirtualRows.swift App/Sources/ResultSelectionAction.swift App/Sources/ResultsColumnLayout.swift \
     App/Sources/ResultsTableColumns.swift App/Sources/ResultsTableHighlights.swift \
     App/Sources/FolderDetailsModel.swift App/Sources/FolderSidebarView.swift \
     App/Sources/SelectionIdentity.swift App/Sources/ResultActions.swift App/Sources/FileIcons.swift \

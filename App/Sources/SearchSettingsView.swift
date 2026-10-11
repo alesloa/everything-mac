@@ -38,9 +38,6 @@ struct SearchSettingsView: View {
                     Text(model.sortKey == .relevance ? "Best match first" : "Ascending").tag(true)
                     Text(model.sortKey == .relevance ? "Best match last" : "Descending").tag(false)
                 }
-                Stepper(value: limitBinding, in: 100...100_000, step: 100) {
-                    LabeledContent("Max results shown", value: model.resultLimit.formatted())
-                }
             }
         }
         .formStyle(.grouped)
@@ -64,8 +61,5 @@ struct SearchSettingsView: View {
     }
     private var ascendingBinding: Binding<Bool> {
         Binding(get: { model.ascending }, set: { model.setSort(model.sortKey, ascending: $0) })
-    }
-    private var limitBinding: Binding<Int> {
-        Binding(get: { model.resultLimit }, set: { model.resultLimit = $0; model.searchOptionsChanged() })
     }
 }

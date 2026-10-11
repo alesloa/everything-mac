@@ -89,7 +89,7 @@ enum SizeConstraint: Sendable {
         let (op, value) = QueryComparison.separate(text)
         return .comparison(op, try bytes(value))
     }
-    private static func bytes(_ text: String) throws -> UInt64 {
+    static func bytes(_ text: String) throws -> UInt64 {
         let number = text.prefix { $0.isASCII && ($0.isNumber || $0 == ".") }
         let unit = text.dropFirst(number.count).lowercased()
         let factors: [String: UInt64] = ["": 1, "b": 1, "k": 1000, "kb": 1000, "m": 1_000_000,
