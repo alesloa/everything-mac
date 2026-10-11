@@ -8,6 +8,7 @@ public final class SearchIndex: @unchecked Sendable {
     private var current = Snapshot(store: FileStore())
 
     public init() {}
+    deinit { current.cancelFolderPreparation() }
 
     public func publish(_ store: FileStore) {
         let next = Snapshot(store: store.searchSnapshot())
@@ -17,6 +18,7 @@ public final class SearchIndex: @unchecked Sendable {
             return previous
         }
         // Releasing a large old store/query cache must not hold the reader lock.
+        previous.cancelFolderPreparation()
         withExtendedLifetime(previous) {}
     }
 
@@ -37,16 +39,29 @@ public final class SearchIndex: @unchecked Sendable {
 
     public func search(_ query: Query, sort: QueryEngine.SortKey = .relevance,
                        ascending: Bool = true, limit: Int = 5000) async -> [FileRecord] {
+        guard limit > 0 else { return [] }
+        return await searchReport(query, sort: sort, ascending: ascending, limit: limit).records
+    }
+
+    public func searchReport(_ query: Query, sort: QueryEngine.SortKey = .relevance,
+                             ascending: Bool = true, limit: Int = 5000,
+                             scope: FolderScope? = nil) async -> SearchReport {
         let query = query.refreshingRelativeDates()
         let snapshot = lock.withLock { current }
         let cancellation = SearchCancellation()
         return await withTaskCancellationHandler {
             let worker = Task.detached(priority: .userInitiated) {
-                snapshot.search(query, sort: sort, ascending: ascending, limit: limit,
+                snapshot.search(query, sort: sort, ascending: ascending, limit: limit, scope: scope,
                                 isCancelled: { cancellation.isCancelled })
             }
             return await worker.value
         } onCancel: { cancellation.cancel() }
+    }
+
+    public func folderSnapshot() async -> FolderSnapshot? {
+        let snapshot = lock.withLock { current }
+        let result = await snapshot.folders().value
+        return Task.isCancelled ? nil : result
     }
 
     private final class Snapshot: @unchecked Sendable {
@@ -62,13 +77,34 @@ public final class SearchIndex: @unchecked Sendable {
             }
         }
         let store: FileStore
+        let id = UUID()
         private let cacheLock = NSLock()
         private var cached: (Query, Matches)?
         private var nameIndex: UniqueNameIndex?
         private let namePreparation: UniqueNameIndex.Preparation
+        private var folderTask: Task<FolderSnapshot?, Never>?
+        private let folderCancellation = SearchCancellation()
         init(store: FileStore) {
             self.store = store
             namePreparation = UniqueNameIndex.Preparation(store: store)
+        }
+
+        func folders() -> Task<FolderSnapshot?, Never> {
+            cacheLock.withLock {
+                if let folderTask { return folderTask }
+                let store = store, id = id, cancellation = folderCancellation
+                let task = Task.detached(priority: .utility) {
+                    FolderSnapshot.build(store: store, snapshotID: id,
+                                         isCancelled: { cancellation.isCancelled || Task.isCancelled })
+                }
+                folderTask = task
+                return task
+            }
+        }
+
+        func cancelFolderPreparation() {
+            folderCancellation.cancel()
+            cacheLock.withLock { folderTask }?.cancel()
         }
 
         private func names() -> UniqueNameIndex? {
@@ -83,8 +119,9 @@ public final class SearchIndex: @unchecked Sendable {
         }
 
         func search(_ query: Query, sort: QueryEngine.SortKey, ascending: Bool, limit: Int,
-                    isCancelled: @escaping @Sendable () -> Bool) -> [FileRecord] {
-            guard limit > 0, !isCancelled() else { return [] }
+                    scope: FolderScope?, isCancelled: @escaping @Sendable () -> Bool) -> SearchReport {
+            let empty = SearchReport(records: [], totalMatches: 0, snapshotID: id, revision: store.revision)
+            guard !isCancelled() else { return empty }
             let engine = QueryEngine()
             let previous = cacheLock.withLock { cached }
             let matches: Matches
@@ -95,13 +132,13 @@ public final class SearchIndex: @unchecked Sendable {
                 // only a provably narrower query, and recompute every fuzzy score.
                 let candidates = previous.flatMap { query.narrows($0.0) ? $0.1.ids : nil }
                 let names = candidates != nil || query.matchPath || query.terms.isEmpty ? nil : names()
-                guard !isCancelled() else { return [] }
+                guard !isCancelled() else { return empty }
                 matches = query.hasFuzzyTerms
                     ? .fuzzy(engine.matches(query, in: store, candidates: candidates,
                                             nameIndex: names, isCancelled: isCancelled))
                     : .exact(engine.search(query, in: store, candidates: candidates,
                                            nameIndex: names, isCancelled: isCancelled))
-                guard !isCancelled() else { return [] }
+                guard !isCancelled() else { return empty }
                 let old = cacheLock.withLock {
                     let old = cached
                     cached = (query, matches)
@@ -109,8 +146,38 @@ public final class SearchIndex: @unchecked Sendable {
                 }
                 withExtendedLifetime(old) {}
             }
+            let displayedMatches: Matches
+            if let scope {
+                guard let directory = scope.resolve(in: store, isCancelled: isCancelled) else { return empty }
+                // Scope is applied after the cached query: changing the sidebar
+                // never invalidates or repeats an ordinary full-index scan.
+                func included(_ child: UInt32) -> Bool {
+                    FolderScope.contains(child, below: directory, in: store)
+                }
+                switch matches {
+                case .exact(let ids):
+                    var filtered: [UInt32] = []
+                    for (offset, child) in ids.enumerated() {
+                        if offset & 1023 == 0 && isCancelled() { return empty }
+                        if included(child) { filtered.append(child) }
+                    }
+                    displayedMatches = .exact(filtered)
+                case .fuzzy(let scored):
+                    var filtered: [SearchMatch] = []
+                    for (offset, match) in scored.enumerated() {
+                        if offset & 1023 == 0 && isCancelled() { return empty }
+                        if included(match.id) { filtered.append(match) }
+                    }
+                    displayedMatches = .fuzzy(filtered)
+                }
+            } else { displayedMatches = matches }
+            let totalMatches: Int
+            switch displayedMatches {
+            case .exact(let ids): totalMatches = ids.count
+            case .fuzzy(let scored): totalMatches = scored.count
+            }
             let sorted: [UInt32]
-            switch matches {
+            switch displayedMatches {
             case .fuzzy(let scored) where sort == .relevance:
                 sorted = engine.rankedPrefix(scored, limit: limit, bestFirst: ascending,
                                              in: store, isCancelled: isCancelled)
@@ -124,13 +191,14 @@ public final class SearchIndex: @unchecked Sendable {
             var records: [FileRecord] = []
             records.reserveCapacity(sorted.count)
             for id in sorted {
-                if isCancelled() { return [] }
+                if isCancelled() { return empty }
                 records.append(FileRecord(id: id, name: store.name(of: id), path: store.path(of: id),
                                           parent: store.parent(of: id), size: store.size(of: id),
                                           mtime: store.mtime(of: id), isDir: store.isDir(of: id),
                                           volID: store.volID(of: id)))
             }
-            return records
+            return SearchReport(records: records, totalMatches: totalMatches,
+                                snapshotID: id, revision: store.revision)
         }
     }
 }

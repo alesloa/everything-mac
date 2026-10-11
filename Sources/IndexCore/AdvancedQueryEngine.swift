@@ -203,7 +203,7 @@ private struct PreparedText: Sendable {
     }
 }
 
-private extension Query {
+extension Query {
     func fold(_ input: String, preservingWildcards: Bool = false) -> String {
         var result = diacriticInsensitive ? input.folding(options: [.diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX")) : input
         if caseInsensitive { result = result.lowercased() }
