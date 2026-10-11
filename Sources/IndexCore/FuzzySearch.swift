@@ -15,6 +15,24 @@ final class SearchParts<T: Sendable>: @unchecked Sendable {
     func joined() -> [T] { lock.withLock { parts.flatMap { $0 } } }
 }
 
+func searchParts<T: Sendable>(count: Int, parallelThreshold: Int,
+                             isCancelled: @escaping @Sendable () -> Bool,
+                             scan: @escaping @Sendable (Int, Int) -> [T]) -> [T] {
+    guard !isCancelled() else { return [] }
+    if count < parallelThreshold {
+        let result = scan(0, count)
+        return isCancelled() ? [] : result
+    }
+    let chunks = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount / 2))
+    let span = (count + chunks - 1) / chunks
+    let parts = SearchParts<T>(count: chunks)
+    DispatchQueue.concurrentPerform(iterations: chunks) { chunk in
+        let lo = chunk * span, hi = min(count, lo + span)
+        if lo < hi { parts.set(scan(lo, hi), at: chunk) }
+    }
+    return isCancelled() ? [] : parts.joined()
+}
+
 extension QueryEngine {
     private enum FuzzyTerm: Sendable {
         case ascii(FuzzyMatcher.Pattern)
@@ -32,11 +50,17 @@ extension QueryEngine {
         }
     }
 
-    public func matches(_ query: Query, in store: FileStore,
-                        candidates: [UInt32]? = nil,
+    public func matches(_ query: Query, in store: FileStore, candidates: [UInt32]? = nil,
                         isCancelled: @escaping @Sendable () -> Bool = { false }) -> [SearchMatch] {
+        matches(query, in: store, candidates: candidates, nameIndex: nil, isCancelled: isCancelled)
+    }
+
+    func matches(_ query: Query, in store: FileStore, candidates: [UInt32]? = nil,
+                 nameIndex: UniqueNameIndex?,
+                 isCancelled: @escaping @Sendable () -> Bool = { false }) -> [SearchMatch] {
         guard query.hasFuzzyTerms else {
-            return search(query, in: store, candidates: candidates, isCancelled: isCancelled).map { SearchMatch(id: $0, score: 0) }
+            return search(query, in: store, candidates: candidates, nameIndex: nameIndex,
+                          isCancelled: isCancelled).map { SearchMatch(id: $0, score: 0) }
         }
         let terms: [FuzzyTerm] = query.tokens.map { token in
             if token.isLiteral {
@@ -47,33 +71,97 @@ extension QueryEngine {
             }
             return .unicode(token.text)
         }
+        @Sendable func evaluate(_ id: UInt32, name: UnsafeBufferPointer<UInt8>, mask: UInt64,
+                      path: String?, terms: [FuzzyTerm]) -> Int? {
+            var string = path
+            var score = 0
+            for term in terms {
+                switch term {
+                case .ascii(let pattern):
+                    guard let value = pattern.score(name, nameMask: mask) else { return nil }
+                    score += value
+                case .unicode(let pattern):
+                    if string == nil { string = store.name(of: id) }
+                    guard let value = FuzzyMatcher.unicodeScore(string!, pattern, ci: query.caseInsensitive) else { return nil }
+                    score += value
+                case .literal(let pattern, let ascii):
+                    if let ascii {
+                        guard Glob.matchesASCII(patternLowerBytes: ascii, in: name) else { return nil }
+                    } else {
+                        if string == nil { string = store.name(of: id) }
+                        guard Glob.matches(pattern: pattern, in: string!, caseInsensitive: query.caseInsensitive) else { return nil }
+                    }
+                }
+            }
+            return score
+        }
+        if let nameIndex, candidates == nil, !query.matchPath {
+            let requirements = terms.map { term -> UniqueNameIndex.Requirement in
+                switch term {
+                case .ascii(let pattern):
+                    return .init(mask: pattern.mask, allowsMissingCharacter: pattern.takesTypos,
+                                 firstCharacter: FuzzyMatcher.bit(pattern.bytes[0]))
+                case .literal(_, let ascii):
+                    let mask = ascii.map { FuzzyMatcher.mask($0.filter { $0 != 42 && $0 != 63 }) } ?? 0
+                    return .init(mask: mask, allowsMissingCharacter: false, firstCharacter: 0)
+                case .unicode:
+                    return .init(mask: 0, allowsMissingCharacter: false, firstCharacter: 0)
+                }
+            }
+            var all: [SearchMatch] = []
+            for layer in nameIndex.layers {
+                if isCancelled() { return [] }
+                let scored: [SearchMatch] = searchParts(count: layer.groupCount, parallelThreshold: 1563,
+                                         isCancelled: isCancelled) { lo, hi in
+                    let localTerms = terms.map { $0.workerCopy() }
+                    return store.withNameArena { arena in
+                        var out: [SearchMatch] = []
+                        for group in lo..<hi {
+                            if group & 15 == 0 && isCancelled() { return [] }
+                            var names = layer.candidates(in: group, requirements: requirements)
+                            while names != 0 {
+                                let nameID = group * 64 + names.trailingZeroBitCount
+                                names &= names - 1
+                                let id = layer.representatives[nameID]
+                                let bytes = arena.bytes(in: store.nameRange(of: id))
+                                if let score = evaluate(id, name: bytes, mask: layer.masks[nameID],
+                                                        path: nil, terms: localTerms) {
+                                    out.append(SearchMatch(id: UInt32(nameID), score: score))
+                                }
+                            }
+                        }
+                        return out
+                    }
+                }
+                if isCancelled() { return [] }
+                guard !scored.isEmpty else { continue }
+                var scores = [Int](repeating: .min, count: layer.representatives.count)
+                for match in scored { scores[Int(match.id)] = match.score }
+                // Expand via a compact ID map rather than sorting duplicate lists.
+                // Metadata and IDs stay distinct, and scan order remains identical
+                // to the per-record matcher for stable sort and narrowing behavior.
+                let immutableScores = scores
+                let expanded: [SearchMatch] = searchParts(count: layer.recordNames.count, parallelThreshold: 100_000,
+                                           isCancelled: isCancelled) { lo, hi in
+                    var out: [SearchMatch] = []
+                    let checkLive = store.hasDeletions
+                    for offset in lo..<hi {
+                        if offset & 1023 == 0 && isCancelled() { return [] }
+                        let score = immutableScores[Int(layer.recordNames[offset])]
+                        if score == .min { continue }
+                        let id = UInt32(layer.recordRange.lowerBound + offset)
+                        if !checkLive || store.isLive(id) { out.append(SearchMatch(id: id, score: score)) }
+                    }
+                    return out
+                }
+                all.append(contentsOf: expanded)
+            }
+            return isCancelled() ? [] : all
+        }
         @Sendable func scan(_ lo: Int, _ hi: Int) -> [SearchMatch] {
             // Give each worker its own small pattern buffers too, so refcounting
             // a pattern in the hot loop cannot contend with other search threads.
             let terms = terms.map { $0.workerCopy() }
-            func evaluate(_ id: UInt32, name: UnsafeBufferPointer<UInt8>, mask: UInt64, path: String?) -> Int? {
-                var string = path
-                var score = 0
-                for term in terms {
-                    switch term {
-                    case .ascii(let pattern):
-                        guard let value = pattern.score(name, nameMask: mask) else { return nil }
-                        score += value
-                    case .unicode(let pattern):
-                        if string == nil { string = store.name(of: id) }
-                        guard let value = FuzzyMatcher.unicodeScore(string!, pattern, ci: query.caseInsensitive) else { return nil }
-                        score += value
-                    case .literal(let pattern, let ascii):
-                        if let ascii {
-                            guard Glob.matchesASCII(patternLowerBytes: ascii, in: name) else { return nil }
-                        } else {
-                            if string == nil { string = store.name(of: id) }
-                            guard Glob.matches(pattern: pattern, in: string!, caseInsensitive: query.caseInsensitive) else { return nil }
-                        }
-                    }
-                }
-                return score
-            }
             // Borrow the name arena once per chunk. Creating an ArraySlice for
             // every record makes worker threads contend on its ARC reference count.
             return store.withNameArena { arena in
@@ -85,7 +173,7 @@ extension QueryEngine {
                     if query.matchPath {
                         let path = store.path(of: id)
                         let value = Array(path.utf8).withUnsafeBufferPointer { name in
-                            evaluate(id, name: name, mask: FuzzyMatcher.mask(name), path: path)
+                            evaluate(id, name: name, mask: FuzzyMatcher.mask(name), path: path, terms: terms)
                         }
                         if let value { out.append(SearchMatch(id: id, score: value)) }
                     } else {
@@ -96,8 +184,8 @@ extension QueryEngine {
                         }
                         guard fits else { continue }
                         let range = store.nameRange(of: id)
-                        let name = UnsafeBufferPointer(start: arena.baseAddress?.advanced(by: range.lowerBound), count: range.count)
-                        if let value = evaluate(id, name: name, mask: mask, path: nil) {
+                        let name = arena.bytes(in: range)
+                        if let value = evaluate(id, name: name, mask: mask, path: nil, terms: terms) {
                             out.append(SearchMatch(id: id, score: value))
                         }
                     }
@@ -106,7 +194,11 @@ extension QueryEngine {
             }
         }
         let n = candidates?.count ?? store.count
-        if n < 100_000 { return isCancelled() ? [] : scan(0, n) }
+        if n < 100_000 {
+            guard !isCancelled() else { return [] }
+            let result = scan(0, n)
+            return isCancelled() ? [] : result
+        }
         // Leave cores available for UI and filesystem work instead of saturating
         // every core with multiple superseded searches.
         let chunks = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount / 2))
