@@ -8,6 +8,7 @@ struct ResultsTable: NSViewRepresentable {
     var onSort: (QueryEngine.SortKey, Bool) -> Void
     var onSelect: (FileRecord?) -> Void
     var onActivate: (FileRecord) -> Void
+    var onSelection: (([FileRecord]) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -24,6 +25,8 @@ struct ResultsTable: NSViewRepresentable {
         table.target = context.coordinator
         table.doubleAction = #selector(Coordinator.doubleClicked(_:))
         table.usesAlternatingRowBackgroundColors = true
+        table.allowsMultipleSelection = true
+        table.setDraggingSourceOperationMask([.copy, .move, .link], forLocal: false)
 
         // Right-click context menu — items target the coordinator; coordinator
         // pins the clicked record before tracking starts. The
@@ -48,6 +51,12 @@ struct ResultsTable: NSViewRepresentable {
         add("Reveal in Finder", #selector(Coordinator.ctxReveal))
         add("Copy Path", #selector(Coordinator.ctxCopyPath))
         add("Copy Name", #selector(Coordinator.ctxCopyName))
+        add("Copy Files", #selector(Coordinator.ctxCopyFiles))
+        add("Paste Files…", #selector(Coordinator.ctxPasteFiles))
+        add("Copy To…", #selector(Coordinator.ctxCopyTo))
+        add("Move To…", #selector(Coordinator.ctxMoveTo))
+        add("Rename…", #selector(Coordinator.ctxRename))
+        add("Get Info", #selector(Coordinator.ctxGetInfo))
         menu.addItem(.separator())
         add("Move to Trash", #selector(Coordinator.ctxTrash))
         table.menu = menu
@@ -63,42 +72,47 @@ struct ResultsTable: NSViewRepresentable {
         context.coordinator.reload(self)
     }
 
-    @MainActor final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+    @MainActor final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate, NSMenuItemValidation {
         var parent: ResultsTable
         weak var table: NSTableView?
         weak var openWithMenu: NSMenu?
         weak var contextMenu: NSMenu?
-        private var contextRecord: FileRecord?
+        private var contextRecords: [FileRecord] = []
         var suppressSelectionCallback = false
         init(_ p: ResultsTable) { parent = p }
 
         func numberOfRows(in tableView: NSTableView) -> Int { parent.rows.count }
 
         func reload(_ next: ResultsTable) {
-            let selected: FileRecord? = table.flatMap { table in
-                parent.rows.indices.contains(table.selectedRow) ? parent.rows[table.selectedRow] : nil
-            }
+            let selected = selectedRecords()
             parent = next
             suppressSelectionCallback = true
             defer { suppressSelectionCallback = false }
             table?.reloadData()
-            if let selected, let row = parent.rows.firstIndex(where: {
-                $0.id == selected.id && $0.path.utf8.elementsEqual(selected.path.utf8)
-            }) {
-                table?.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            } else {
-                // Rebuilds reuse numeric IDs. Never keep the highlight on a new
-                // file that happens to occupy the old record's slot or row.
-                table?.deselectAll(nil)
-            }
+            let identities = Set(selected.map { SelectionIdentity($0) })
+            let indexes = IndexSet(parent.rows.indices.filter { identities.contains(SelectionIdentity(parent.rows[$0])) })
+            // Rebuilds reuse IDs; every selected row must also keep its exact path bytes.
+            if indexes.isEmpty { table?.deselectAll(nil) }
+            else { table?.selectRowIndexes(indexes, byExtendingSelection: false) }
         }
 
         // Report the user's row pick up to the model so the menu bar can act on it.
         // Skipped during programmatic reselection (see updateNSView).
         func tableViewSelectionDidChange(_ notification: Notification) {
-            guard !suppressSelectionCallback, let t = table else { return }
-            let r = t.selectedRow
-            parent.onSelect(r >= 0 && r < parent.rows.count ? parent.rows[r] : nil)
+            guard !suppressSelectionCallback else { return }
+            let records = selectedRecords()
+            parent.onSelect(records.first)
+            parent.onSelection?(records)
+        }
+
+        func selectedRecords() -> [FileRecord] {
+            guard let table else { return [] }
+            return table.selectedRowIndexes.compactMap { parent.rows.indices.contains($0) ? parent.rows[$0] : nil }
+        }
+
+        func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+            guard parent.rows.indices.contains(row) else { return nil }
+            return URL(fileURLWithPath: parent.rows[row].path) as NSURL
         }
 
         func tableView(_ t: NSTableView, viewFor col: NSTableColumn?, row: Int) -> NSView? {
@@ -189,15 +203,31 @@ struct ResultsTable: NSViewRepresentable {
         func clickedRecord() -> FileRecord? {
             // The main menu captures the file before tracking starts. Live results
             // can reorder while the menu is open; actions keep the clicked path.
-            if contextMenu != nil { return contextRecord }
+            if contextMenu != nil { return contextRecords.first }
             guard let r = table?.clickedRow, r >= 0, r < parent.rows.count else { return nil }
             return parent.rows[r]
         }
-        @objc func ctxOpen()     { if let r = clickedRecord() { ResultActions.open(r) } }
-        @objc func ctxReveal()   { if let r = clickedRecord() { ResultActions.reveal(r) } }
-        @objc func ctxCopyPath() { if let r = clickedRecord() { ResultActions.copyPath(r) } }
-        @objc func ctxCopyName() { if let r = clickedRecord() { ResultActions.copyName(r) } }
-        @objc func ctxTrash()    { if let r = clickedRecord() { ResultActions.trash(r) } }
+        func clickedRecords() -> [FileRecord] {
+            if contextMenu != nil { return contextRecords }
+            return clickedRecord().map { [$0] } ?? []
+        }
+        @objc func ctxOpen()     { ResultActions.open(clickedRecords()) }
+        @objc func ctxReveal()   { ResultActions.reveal(clickedRecords()) }
+        @objc func ctxCopyPath() { ResultActions.copyPath(clickedRecords()) }
+        @objc func ctxCopyName() { ResultActions.copyName(clickedRecords()) }
+        @objc func ctxTrash()    { ResultActions.trash(clickedRecords()) }
+        @objc func ctxCopyFiles() { ResultActions.copyFiles(clickedRecords()) }
+        @objc func ctxPasteFiles() { ResultActions.pasteFiles(into: clickedRecords().count == 1 ? clickedRecord() : nil) }
+        @objc func ctxCopyTo() { ResultActions.copyTo(clickedRecords()) }
+        @objc func ctxMoveTo() { ResultActions.moveTo(clickedRecords()) }
+        @objc func ctxRename() { ResultActions.rename(clickedRecords()) }
+        @objc func ctxGetInfo() { ResultActions.getInfo(clickedRecords()) }
+
+        func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+            guard !clickedRecords().isEmpty, !ResultActions.state.isBusy else { return false }
+            if menuItem.action == #selector(ctxPasteFiles) { return ResultActions.canPasteFiles }
+            return true
+        }
 
         // Notepad Studio is always pinned in the submenu so any file — even one with
         // no associated app — can be opened with it. Resolved by bundle id at runtime
@@ -211,8 +241,11 @@ struct ResultsTable: NSViewRepresentable {
         func menuNeedsUpdate(_ menu: NSMenu) {
             if menu === contextMenu {
                 if let row = table?.clickedRow, parent.rows.indices.contains(row) {
-                    contextRecord = parent.rows[row]
-                } else { contextRecord = nil }
+                    contextRecords = table?.selectedRowIndexes.contains(row) == true ? selectedRecords() : [parent.rows[row]]
+                } else { contextRecords = [] }
+                for item in menu.items where item.action != nil {
+                    item.isEnabled = !contextRecords.isEmpty && !ResultActions.state.isBusy
+                }
                 return
             }
             guard menu === openWithMenu else { return }
@@ -248,14 +281,15 @@ struct ResultsTable: NSViewRepresentable {
         }
 
         @objc func ctxOpenWith(_ sender: NSMenuItem) {
-            guard let r = clickedRecord(), let app = sender.representedObject as? URL else { return }
-            ResultActions.open(r, with: app)
+            guard let app = sender.representedObject as? URL else { return }
+            ResultActions.open(clickedRecords(), with: app)
         }
 
         // Browse for any app to open the file with (Finder's "Open With ▸ Other…").
         // Capture the pinned record before the panel's nested event loop.
         @objc func ctxOpenWithChoose() {
-            guard let r = clickedRecord() else { return }
+            let records = clickedRecords()
+            guard !records.isEmpty else { return }
             let panel = NSOpenPanel()
             panel.title = "Choose Application"
             panel.directoryURL = URL(fileURLWithPath: "/Applications")
@@ -263,7 +297,7 @@ struct ResultsTable: NSViewRepresentable {
             panel.allowsMultipleSelection = false
             panel.canChooseDirectories = false
             if panel.runModal() == .OK, let app = panel.url {
-                ResultActions.open(r, with: app)
+                ResultActions.open(records, with: app)
             }
         }
 
