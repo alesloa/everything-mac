@@ -16,6 +16,8 @@ targets:
       properties:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        # Source: the owner's requested native Finder Get Info action.
+        NSAppleEventsUsageDescription: "EverythingMac asks Finder to show information about the files you select."
     entitlements:
       path: EverythingMac.entitlements
     dependencies:

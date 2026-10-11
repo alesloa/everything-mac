@@ -13,6 +13,7 @@ struct GeneralSettingsView: View {
                     // the toggle snaps back instead of lying.
                     .onChange(of: launchAtLogin) { launchAtLogin = LaunchAtLogin.set(launchAtLogin) }
             }
+            GlobalAccessSettingsView()
             Section("Index") {
                 LabeledContent("Objects indexed", value: model.total.formatted())
                 if let s = Self.cacheStats() {

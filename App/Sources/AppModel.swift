@@ -8,12 +8,16 @@ final class AppModel: ObservableObject {
     @Published var query = ""
     @Published var results: [FileRecord] = [] {
         didSet {
+            selectedRecords = selectedRecords.compactMap { selected in
+                results.first { $0.id == selected.id && $0.path.utf8.elementsEqual(selected.path.utf8) }
+            }
             if selectedID != nil && selected == nil {
-                selectedID = nil
+                selectedID = selectedRecords.first?.id
             }
         }
     }
     @Published var total = 0
+    @Published var indexRevision: UInt64 = 0
     @Published var sortKey: QueryEngine.SortKey = .relevance
     @Published var ascending = true
     @Published var matchPath = false
@@ -23,6 +27,18 @@ final class AppModel: ObservableObject {
     @Published var caseSensitive = false
     @Published var wholeWord = false
     @Published var fuzzy = true
+    @Published var regex = false
+    @Published var diacriticInsensitive = false
+    @Published var matchPrefix = false
+    @Published var matchSuffix = false
+    @Published var ignorePunctuation = false
+    @Published var ignoreWhitespace = false
+    @Published var searchFilter: SearchFilter = .all
+    @Published var searchError: String?
+    @Published var activePanel: AppFeaturePanel?
+    @Published var previewVisible = false
+    @Published var thumbnailView = false
+    @Published var selectedRecords: [FileRecord] = []
     // Max rows handed to the table — the old hardcoded 5000 cap, now user-tunable.
     @Published var resultLimit = 5000
     @Published var rules: ExcludeRules = .defaults
@@ -46,8 +62,12 @@ final class AppModel: ObservableObject {
         return results.first { $0.id == id && $0.path.utf8.elementsEqual(path.utf8) }
     }
 
+    var actionRecords: [FileRecord] {
+        selectedRecords.isEmpty ? selected.map { [$0] } ?? [] : selectedRecords
+    }
+
     let index: IndexActor
-    private let preferences: UserDefaults
+    let preferences: UserDefaults
     private var task: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
     private var flushTimer: Task<Void, Never>?
@@ -60,6 +80,8 @@ final class AppModel: ObservableObject {
     private var searchTask: Task<[FileRecord], Never>?
     private var rebuildTask: Task<Void, Never>?
     private var activeScanID: UUID?
+    private weak var backgroundOwner: AppModel?
+    private var backgroundSubscriptions: Set<AnyCancellable> = []
 
     init(index: IndexActor = IndexActor(), preferences: UserDefaults = .standard) {
         self.index = index
@@ -88,7 +110,35 @@ final class AppModel: ObservableObject {
         startIndex()
     }
 
+    // Windows have independent search state while one owner starts and updates
+    // the shared index. Only the owner runs filesystem timers and rebuilds.
+    func prepareWindow(with background: AppModel) {
+        guard !bootstrapped else { return }
+        bootstrapped = true
+        backgroundOwner = background
+        loadPrefs()
+        total = background.total; scanning = background.scanning; shares = background.shares
+        rules = background.rules; fdaGranted = background.fdaGranted
+        awaitingFullDiskAccess = background.awaitingFullDiskAccess
+        background.$total.sink { [weak self] value in self?.total = value }
+            .store(in: &backgroundSubscriptions)
+        background.$scanning.sink { [weak self] value in self?.scanning = value }
+            .store(in: &backgroundSubscriptions)
+        background.$shares.sink { [weak self] value in self?.shares = value }
+            .store(in: &backgroundSubscriptions)
+        background.$rules.sink { [weak self] value in self?.rules = value }
+            .store(in: &backgroundSubscriptions)
+        background.$fdaGranted.sink { [weak self] value in self?.fdaGranted = value }
+            .store(in: &backgroundSubscriptions)
+        background.$awaitingFullDiskAccess.sink { [weak self] value in self?.awaitingFullDiskAccess = value }
+            .store(in: &backgroundSubscriptions)
+        background.$indexRevision.sink { [weak self] _ in
+            Task { @MainActor [weak self] in await self?.runSearch() }
+        }.store(in: &backgroundSubscriptions)
+    }
+
     func continueWithoutFullDiskAccess() {
+        if let backgroundOwner { backgroundOwner.continueWithoutFullDiskAccess(); return }
         fdaPollTask?.cancel()
         awaitingFullDiskAccess = false
         startIndex()
@@ -134,6 +184,7 @@ final class AppModel: ObservableObject {
                 scanning = false
                 total = index.totalCount
                 rules = currentRules
+                indexRevision &+= 1
                 await runSearch()
             }
             startFlushTimer()
@@ -211,11 +262,17 @@ final class AppModel: ObservableObject {
         searchTask?.cancel()
         searchSeq &+= 1
         let mySeq = searchSeq
-        let query = query, matchPath = matchPath, caseInsensitive = !caseSensitive
-        let wholeWord = wholeWord, fuzzy = fuzzy, sort = sortKey, ascending = ascending, limit = resultLimit
+        let query = currentQuery
+        if let error = query.validationError {
+            // Source: the parser's validation error for the owner's entered query.
+            searchError = error.localizedDescription
+            results = []
+            return
+        }
+        searchError = nil
+        let sort = sortKey, ascending = ascending, limit = resultLimit
         let worker = Task {
-            await index.search(query, matchPath: matchPath, caseInsensitive: caseInsensitive,
-                               wholeWord: wholeWord, fuzzy: fuzzy, sort: sort, ascending: ascending, limit: limit)
+            await index.search(query, sort: sort, ascending: ascending, limit: limit)
         }
         searchTask = worker
         let r = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
@@ -232,6 +289,7 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 200_000_000)
             if Task.isCancelled { return }
             if !scanning { total = index.totalCount }
+            indexRevision &+= 1
             await runSearch()
         }
     }
@@ -250,6 +308,22 @@ final class AppModel: ObservableObject {
 
     func focusSearch() { focusSearchSignal &+= 1 }
 
+    func selectRecords(_ records: [FileRecord]) {
+        selectedRecords = records.filter { selected in
+            results.contains { $0.id == selected.id && $0.path.utf8.elementsEqual(selected.path.utf8) }
+        }
+        selectedID = selectedRecords.first?.id
+    }
+
+    var currentQuery: Query {
+        let base = Query(text: query, matchPath: matchPath,
+              caseInsensitive: !caseSensitive, wholeWord: wholeWord, fuzzy: fuzzy,
+              regex: regex, diacriticInsensitive: diacriticInsensitive,
+              matchPrefix: matchPrefix, matchSuffix: matchSuffix,
+              ignorePunctuation: ignorePunctuation, ignoreWhitespace: ignoreWhitespace)
+        return searchFilter.applying(to: base)
+    }
+
     // MARK: - Search preference persistence (UserDefaults)
 
     func loadPrefs() {
@@ -259,6 +333,17 @@ final class AppModel: ObservableObject {
         wholeWord = d.bool(forKey: "pref.wholeWord")
         let hasFuzzyPref = d.object(forKey: "pref.fuzzy") != nil
         fuzzy = hasFuzzyPref ? d.bool(forKey: "pref.fuzzy") : true
+        regex = d.bool(forKey: "pref.regex")
+        diacriticInsensitive = d.bool(forKey: "pref.diacriticInsensitive")
+        matchPrefix = d.bool(forKey: "pref.matchPrefix")
+        matchSuffix = d.bool(forKey: "pref.matchSuffix")
+        ignorePunctuation = d.bool(forKey: "pref.ignorePunctuation")
+        ignoreWhitespace = d.bool(forKey: "pref.ignoreWhitespace")
+        if let name = d.string(forKey: "pref.searchFilter"), let filter = SearchFilter(rawValue: name) {
+            searchFilter = filter
+        }
+        previewVisible = d.bool(forKey: "pref.previewVisible")
+        thumbnailView = d.bool(forKey: "pref.thumbnailView")
         let lim = d.integer(forKey: "pref.resultLimit")
         resultLimit = lim > 0 ? lim : 5000
         if hasFuzzyPref {
@@ -273,6 +358,15 @@ final class AppModel: ObservableObject {
         d.set(caseSensitive, forKey: "pref.caseSensitive")
         d.set(wholeWord, forKey: "pref.wholeWord")
         d.set(fuzzy, forKey: "pref.fuzzy")
+        d.set(regex, forKey: "pref.regex")
+        d.set(diacriticInsensitive, forKey: "pref.diacriticInsensitive")
+        d.set(matchPrefix, forKey: "pref.matchPrefix")
+        d.set(matchSuffix, forKey: "pref.matchSuffix")
+        d.set(ignorePunctuation, forKey: "pref.ignorePunctuation")
+        d.set(ignoreWhitespace, forKey: "pref.ignoreWhitespace")
+        d.set(searchFilter.rawValue, forKey: "pref.searchFilter")
+        d.set(previewVisible, forKey: "pref.previewVisible")
+        d.set(thumbnailView, forKey: "pref.thumbnailView")
         d.set(resultLimit, forKey: "pref.resultLimit")
         d.set(Self.sortKeyName(sortKey), forKey: "pref.sortKey")
         d.set(ascending, forKey: "pref.ascending")
@@ -305,11 +399,13 @@ final class AppModel: ObservableObject {
     // but without changing the exclude rules — for when the index drifts or the user
     // wants to be sure it's fresh. Persists the result so the next launch matches.
     func rebuildIndex() {
+        if let backgroundOwner { backgroundOwner.rebuildIndex(); return }
         guard !scanning else { return }
         beginRebuild(rules: nil)
     }
 
     func applyRules(_ newRules: ExcludeRules) {
+        if let backgroundOwner { backgroundOwner.applyRules(newRules); return }
         beginRebuild(rules: newRules)
     }
 
@@ -335,6 +431,7 @@ final class AppModel: ObservableObject {
             rebuildTask = nil
             scanning = false
             total = index.totalCount
+            indexRevision &+= 1
             await runSearch()
         }
     }
