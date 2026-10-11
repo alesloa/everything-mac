@@ -13,8 +13,14 @@ final class SearchWindowRegistry {
         return ordered + registered.filter { candidate in !ordered.contains { $0 === candidate } }
     }
 
-    func attach(_ window: NSWindow, model: AppModel) { models.setObject(model, forKey: window) }
-    func detach(_ window: NSWindow) { models.removeObject(forKey: window) }
+    func attach(_ window: NSWindow, model: AppModel) {
+        models.setObject(model, forKey: window)
+        QuickLookController.shared.registerOwnerWindow(window)
+    }
+    func detach(_ window: NSWindow) {
+        models.removeObject(forKey: window)
+        QuickLookController.shared.unregisterOwnerWindow(window)
+    }
     func model(for window: NSWindow) -> AppModel? { models.object(forKey: window) }
 }
 

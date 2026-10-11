@@ -10,8 +10,35 @@ import IndexCore
     private var task: Task<Void, Never>?
     private var requestID = UUID()
     private weak var hostWindow: NSWindow?
+    private weak var ownerWindow: NSWindow?
+    private let registeredWindows = NSHashTable<NSWindow>.weakObjects()
+    private let activeWindow: @MainActor () -> NSWindow?
+    var hasPendingRequest: Bool { task != nil }
+
+    init(activeWindow: @escaping @MainActor () -> NSWindow? = { NSApp.mainWindow ?? NSApp.keyWindow }) {
+        self.activeWindow = activeWindow
+        super.init()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    // Source: SearchWindowRegistry mirrors each search window's attach/detach lifecycle.
+    func registerOwnerWindow(_ window: NSWindow) { registeredWindows.add(window) }
+
+    func unregisterOwnerWindow(_ window: NSWindow) {
+        registeredWindows.remove(window)
+        if ownerWindow === window { close() }
+    }
+
+    private var activeOwnerWindow: NSWindow? {
+        guard let window = activeWindow(), registeredWindows.contains(window) else { return nil }
+        return window
+    }
 
     func show(_ records: [FileRecord], allowsNetwork: Bool = false) {
+        guard let window = activeOwnerWindow else { return }
+        if ownerWindow !== window { close() }
+        ownerWindow = window
         task?.cancel()
         requestID = UUID()
         let request = requestID
@@ -21,16 +48,19 @@ import IndexCore
             panel.reloadData()
         }
         guard !records.isEmpty else { close(); return }
-        task = Task {
+        task = Task { [weak window] in
             var resolved: [PreviewFile] = []
             for record in records {
                 guard !Task.isCancelled else { return }
                 if let file = await PreviewFileAccess.resolve(record, allowsNetwork: allowsNetwork) { resolved.append(file) }
             }
             guard !Task.isCancelled, request == requestID else { return }
+            guard let window, ownerWindow === window, activeOwnerWindow === window,
+                  window.isVisible, !window.isMiniaturized else { close(); return }
+            task = nil
             files = resolved
             guard !files.isEmpty else { close(); return }
-            installResponder()
+            installResponder(in: window)
             guard let panel = QLPreviewPanel.shared() else { return }
             panel.updateController()
             panel.makeKeyAndOrderFront(nil)
@@ -59,11 +89,11 @@ import IndexCore
         }
         if hostWindow?.nextResponder === self { hostWindow?.nextResponder = nextResponder }
         hostWindow = nil
+        ownerWindow = nil
         nextResponder = nil
     }
 
-    private func installResponder() {
-        guard let window = NSApp.mainWindow ?? NSApp.keyWindow, window !== QLPreviewPanel.shared() else { return }
+    private func installResponder(in window: NSWindow) {
         if hostWindow === window, window.nextResponder === self { return }
         if hostWindow?.nextResponder === self { hostWindow?.nextResponder = nextResponder }
         hostWindow = window
