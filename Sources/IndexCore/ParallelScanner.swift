@@ -161,6 +161,7 @@ public enum ParallelScanner {
         if path.utf8.elementsEqual(root.utf8) {
             var metadata = stat()
             guard fstat(dirfd(dir), &metadata) == 0, metadata.st_size >= 0 else { return nil }
+            // Source: fstat of the opened root directory supplies its size and modification date.
             rootMetadata = (UInt64(metadata.st_size), Int64(metadata.st_mtimespec.tv_sec))
         }
         var names: [String] = []

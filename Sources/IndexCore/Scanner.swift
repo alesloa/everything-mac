@@ -58,6 +58,7 @@ public struct Scanner: Sendable {
         defer { closedir(directory) }
         var metadata = stat()
         guard fstat(dirfd(directory), &metadata) == 0, metadata.st_size >= 0 else { throw ScanError() }
+        // Source: fstat of the opened root directory supplies its size and modification date.
         let rootID = store.append(name: rootName, parent: FileStore.noParent,
                                   size: UInt64(metadata.st_size), mtime: Int64(metadata.st_mtimespec.tv_sec),
                                   isDir: true, volID: volID)

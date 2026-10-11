@@ -197,6 +197,7 @@ public struct FileStore: Sendable {
             let id = UInt32(i)
             guard sub.isLive(id) else { continue }
             if id == sub.rootID {
+                // Source: the scanned substore retains the filesystem's root size and modification date.
                 let r = append(name: rootName, parent: parent, size: sub.size(of: id),
                                mtime: sub.mtime(of: id), isDir: sub.isDir(of: id), volID: volID)
                 idMap[i] = r; newRoot = r
