@@ -1,6 +1,6 @@
 # EverythingMac
 
-Search files and folders across your disks as you type. Fuzzy matching finds abbreviated names and tolerates a single letter typo in longer terms, with the best matches first. It's a macOS clone of [Everything](https://www.voidtools.com/), the search tool I lived in back on Windows.
+Search files and folders across your disks as you type. Normal searches match consecutive text: `expo` finds `export.swift`. Optional fuzzy matching finds abbreviated names and tolerates a single letter typo in longer terms. It's a macOS clone of [Everything](https://www.voidtools.com/), the search tool I lived in back on Windows.
 
 ![EverythingMac searching across 8.2 million files](assets/screenshot.png)
 
@@ -20,7 +20,7 @@ So I wrote my own. It reads every filename on the machine into memory and search
 
 ## What it does
 
-- Fuzzy filename search enabled by default, with relevance ranking and an exact substring-search switch in the search bar. Quotes, wildcards, and Match Whole Word retain exact matching semantics.
+- Contiguous filename text matching by default, with optional fuzzy matching in Filters. Quotes, wildcards, and Match Whole Word retain their matching semantics.
 - Searches local volumes and selected network shares, updating on each keystroke.
 - Indexes the whole disk, files and folders, and keeps the index current through FSEvents.
 - Results table with sortable Name, Path, Size, Kind, and Date Modified, persisted column layouts, exact match counts, and highlighted matches. Optional Indexed Size and Files columns summarize indexed descendants.
@@ -38,17 +38,18 @@ So I wrote my own. It reads every filename on the machine into memory and search
 
 ### Fuzzy search
 
-Type `fnlrpt` to find a name such as `FinalReport.pdf`, or `repotr` to find
+Enable **Filters > Fuzzy Matching** to type `fnlrpt` and find a name such as `FinalReport.pdf`, or `repotr` to find
 `report.pdf`. Plain terms use subsequence matching; ASCII terms of at least five
 characters can tolerate one wrong, extra, missing, or swapped letter at a word
 prefix. The first letter must agree and digits are never corrected. Unicode
 terms support subsequence matching. Multiple terms are combined with AND.
 
 Use `"report"` for a literal substring, `rep*.pdf` for an anchored wildcard,
-or turn off **Fuzzy** for the previous substring behavior. **Match Whole Word**
+or leave **Fuzzy Matching** off for normal consecutive-text matching. **Match Whole Word**
 uses exact bounded terms. Select **View > Sort By > Relevance** for best matches
-first, or a table column for ordinary sorting. Fuzzy and relevance are the new
-defaults on upgrade; subsequent choices persist.
+first, or a table column for ordinary sorting. New searches default to Name ordering.
+Upgrading to 0.5.1 switches ordinary restored tabs to consecutive-text matching once;
+saved searches and history keep their recorded options. Later fuzzy choices persist.
 
 The matcher adapts the MIT-licensed scoring used by
 [fsearch](https://github.com/noahdunnagan/fsearch), as integrated by

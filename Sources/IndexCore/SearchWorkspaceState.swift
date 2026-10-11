@@ -6,7 +6,7 @@ public struct SearchWorkspaceState: Codable, Equatable, Sendable {
     public var matchPath = false
     public var caseSensitive = false
     public var wholeWord = false
-    public var fuzzy = true
+    public var fuzzy = false
     public var regex = false
     public var diacriticInsensitive = false
     public var matchPrefix = false
@@ -17,7 +17,7 @@ public struct SearchWorkspaceState: Codable, Equatable, Sendable {
     // Optional so older saved tabs, history and bookmarks retain their single filter.
     public var filters: SearchFilters?
     public var customFilterID: UUID?
-    public var sortKey = "relevance"
+    public var sortKey = "name"
     public var ascending = true
     public var resultLimit = 5000
     public var previewVisible = false
@@ -50,7 +50,7 @@ public struct SearchWorkspaceState: Codable, Equatable, Sendable {
     public mutating func normalize() {
         // Source: SearchSettingsView's accepted result-limit range and app sort definitions.
         resultLimit = min(100_000, max(100, resultLimit))
-        if !["relevance", "name", "path", "size", "mtime", "kind"].contains(sortKey) { sortKey = "relevance" }
+        if !["relevance", "name", "path", "size", "mtime", "kind"].contains(sortKey) { sortKey = "name" }
     }
 }
 

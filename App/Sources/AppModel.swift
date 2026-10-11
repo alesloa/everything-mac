@@ -47,7 +47,7 @@ final class AppModel: ObservableObject {
     @Published var indexRevision: UInt64 = 0
     @Published var totalMatches: Int?
     @Published var resultSnapshotID: UUID?
-    @Published var sortKey: QueryEngine.SortKey = .relevance
+    @Published var sortKey: QueryEngine.SortKey = .name
     @Published var ascending = true
     @Published var matchPath = false
     // Live search modifiers (Everything's Match Case / Match Whole Word). Persisted
@@ -55,7 +55,7 @@ final class AppModel: ObservableObject {
     // re-runs the query instantly without re-indexing.
     @Published var caseSensitive = false
     @Published var wholeWord = false
-    @Published var fuzzy = true
+    @Published var fuzzy = false
     @Published var regex = false
     @Published var diacriticInsensitive = false
     @Published var matchPrefix = false
@@ -518,7 +518,7 @@ final class AppModel: ObservableObject {
         caseSensitive = d.bool(forKey: "pref.caseSensitive")
         wholeWord = d.bool(forKey: "pref.wholeWord")
         let hasFuzzyPref = d.object(forKey: "pref.fuzzy") != nil
-        fuzzy = hasFuzzyPref ? d.bool(forKey: "pref.fuzzy") : true
+        fuzzy = hasFuzzyPref ? d.bool(forKey: "pref.fuzzy") : false
         regex = d.bool(forKey: "pref.regex")
         diacriticInsensitive = d.bool(forKey: "pref.diacriticInsensitive")
         matchPrefix = d.bool(forKey: "pref.matchPrefix")

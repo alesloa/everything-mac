@@ -23,12 +23,23 @@ import IndexCore
                              ("report.pdf", 700_000_000), ("report-small.jpg", 500_000_000), ("report-big.mp4", 2_000_000_000)] {
             store.append(name: name, parent: root, size: size, mtime: 0, isDir: false, volID: 1)
         }
+        for name in ["expo", "Expo.app", "export.swift", "e_x_p_o.txt", "index-position.txt"] {
+            store.append(name: name, parent: root, size: 1, mtime: 0, isDir: false, volID: 1)
+        }
         let fixture = store
         let index = IndexActor(rules: .defaults, preferencesSuiteName: suite,
             cacheURL: directory.appendingPathComponent("index.idx"), diskScanner: { _, _, _ in fixture }, networkMounts: { [] })
         try require(await index.rescanAll(), "Fixture scan failed")
         let model = AppModel(index: index, preferences: preferences)
         model.workspace.activate(defaultState: SearchWorkspaceState())
+        try require(!model.fuzzy && model.sortKey == .name, "New app defaults unexpectedly enable fuzzy search")
+        model.query = "expo"; model.setSearchFilter(.files)
+        try await waitUntil { model.totalMatches == 3 }
+        try require(Set(model.results.map(\.name)) == ["expo", "Expo.app", "export.swift"], "Plain expo search accepted gaps")
+        model.fuzzy = true; model.searchOptionsChanged()
+        try await waitUntil { model.totalMatches == 5 }
+        model.fuzzy = false; model.searchOptionsChanged()
+        try await waitUntil { model.totalMatches == 3 }
         model.query = "report"; model.fuzzy = false
         model.setSearchFilter(.files)
         model.toggleSearchFilter(.images)

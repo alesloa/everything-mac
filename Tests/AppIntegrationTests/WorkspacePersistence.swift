@@ -5,6 +5,7 @@ import IndexCore
 @main
 struct WorkspacePersistence {
     @MainActor static func main() async throws {
+        try verifyLiteralSearchMigration()
         let suite = "workspace-tests-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
@@ -79,5 +80,69 @@ struct WorkspacePersistence {
         precondition(preserved == unreadable)
         precondition(recovered.windows.isEmpty)
         print("PASS: independent tabs/windows, shared saves, isolated prefs, restoration and debounced history")
+    }
+
+    @MainActor private static func verifyLiteralSearchMigration() throws {
+        let suite = "literal-default-tests-\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suite)!
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { preferences.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("workspaces.json")
+        var legacy = SearchWorkspaceState(query: "expo")
+        legacy.fuzzy = true; legacy.sortKey = "size"; legacy.caseSensitive = true
+        legacy.filters = SearchFilters(types: [.files], over: SearchSizeLimit(amount: "500"))
+        var window = SearchWindowState(state: legacy)
+        window.update(legacy, record: true)
+        _ = window.addTab(state: legacy)
+        var archive = SearchWorkspaceArchive()
+        archive.windows = [window]
+        archive.savedSearches = [SavedSearch(name: "Saved fuzzy", state: legacy)]
+        archive.record(legacy)
+        try SearchWorkspaceStore(url: url).save(archive)
+        preferences.set(true, forKey: "pref.fuzzy")
+        let library = WorkspaceLibrary(preferences: preferences, storageURL: url)
+        precondition(library.archive.windows.flatMap(\.tabs).allSatisfy { !$0.state.fuzzy })
+        precondition(library.archive.windows[0].selectedTab.state.query == "expo")
+        precondition(library.archive.windows[0].selectedTab.state.effectiveFilters == legacy.effectiveFilters)
+        precondition(library.archive.windows[0].selectedTab.state.sortKey == "size")
+        precondition(library.archive.windows[0].selectedTab.state.caseSensitive)
+        precondition(library.archive.savedSearches[0].state.fuzzy && library.archive.history[0].state.fuzzy)
+        precondition(library.archive.windows[0].tabs[0].navigation[0].state.fuzzy)
+        precondition(!preferences.bool(forKey: "pref.fuzzy"))
+        let controller = SearchWorkspaceController(library: library, windowID: window.id.uuidString)
+        var optedIn = controller.activate(defaultState: SearchWorkspaceState())
+        optedIn.fuzzy = true; controller.stage(optedIn)
+        preferences.set(true, forKey: "pref.fuzzy"); library.flush()
+        let reloaded = WorkspaceLibrary(preferences: preferences, storageURL: url)
+        precondition(reloaded.archive.windows[0].selectedTab.state.fuzzy)
+        precondition(preferences.bool(forKey: "pref.fuzzy"))
+
+        preferences.removeObject(forKey: "pref.literalSearchDefault.v1")
+        let beforeFailedSave = try Data(contentsOf: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+        let unwritable = WorkspaceLibrary(preferences: preferences, storageURL: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        let afterFailedSave = try Data(contentsOf: url)
+        precondition(unwritable.storageError != nil && beforeFailedSave == afterFailedSave)
+        precondition(!preferences.bool(forKey: "pref.literalSearchDefault.v1"))
+        unwritable.flush()
+        precondition(unwritable.storageError == nil && preferences.bool(forKey: "pref.literalSearchDefault.v1"))
+
+        preferences.removeObject(forKey: "pref.literalSearchDefault.v1")
+        let broken = Data("broken archive".utf8)
+        try broken.write(to: url)
+        let corrupt = WorkspaceLibrary(preferences: preferences, storageURL: url)
+        let untouched = try Data(contentsOf: url)
+        precondition(corrupt.storageError != nil && untouched == broken)
+        precondition(!preferences.bool(forKey: "pref.literalSearchDefault.v1"))
+        corrupt.flush()
+        precondition(corrupt.storageError == nil && preferences.bool(forKey: "pref.literalSearchDefault.v1"))
+        let backups = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("workspaces.json.unreadable-") }
+        precondition(backups.count == 1)
+        let preserved = try Data(contentsOf: backups[0])
+        precondition(preserved == broken)
+        print("PASS: literal defaults migrate restored tabs once and preserve saved searches, history, opt-in and recovery")
     }
 }
