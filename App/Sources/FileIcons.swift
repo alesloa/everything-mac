@@ -6,13 +6,10 @@ import UniformTypeIdentifiers
 // NSWorkspace / re-resolving UTTypes per row. icon(for: UTType) resolves from the
 // type registry (no disk I/O), so this stays cheap even while scrolling fast.
 // Called only from the table delegate (main thread) — no locking needed.
-enum FileIcons {
-    // Called from the table delegate (main thread), but a plain static var trips
-    // Swift 6 strict-concurrency. The lock makes the caches correct from any
-    // thread; nonisolated(unsafe) tells the compiler the lock is the guarantee.
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var iconCache: [String: NSImage] = [:]
-    nonisolated(unsafe) private static var kindCache: [String: String] = [:]
+@MainActor enum FileIcons {
+    // MainActor confines the caches and AppKit image access to the UI thread.
+    private static var iconCache: [String: NSImage] = [:]
+    private static var kindCache: [String: String] = [:]
 
     // One cache slot per kind: all directories share "\0dir"; files key on their
     // lowercased extension (extensionless files share "").
@@ -26,7 +23,6 @@ enum FileIcons {
 
     static func icon(ext: String, isDir: Bool) -> NSImage {
         let k = key(ext: ext, isDir: isDir)
-        lock.lock(); defer { lock.unlock() }
         if let img = iconCache[k] { return img }
         let img = NSWorkspace.shared.icon(for: utType(ext: ext, isDir: isDir))
         img.size = NSSize(width: 16, height: 16)
@@ -36,7 +32,6 @@ enum FileIcons {
 
     static func kind(ext: String, isDir: Bool) -> String {
         let k = key(ext: ext, isDir: isDir)
-        lock.lock(); defer { lock.unlock() }
         if let s = kindCache[k] { return s }
         let s: String
         if isDir { s = "Folder" }

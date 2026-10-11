@@ -15,6 +15,9 @@ All notable changes to EverythingMac are recorded here. The format is based on
 - Memory-mapped index bases, small live-update overlays, streamed atomic cache saves, and background compaction that preserves record IDs and in-flight snapshots.
 
 ### Fixed
+- Releasing or restarting the filesystem watcher now stops the previous stream and keeps in-flight callback data alive, preventing callbacks from reading freed memory.
+- Concurrent mount-table reads use separate owned buffers; native file icons and file actions are confined to the main actor.
+- Result rendering safely handles stale row requests and unsigned file sizes beyond the signed formatter's range without changing their values.
 - Searches and file counts no longer queue behind directory reconciliation, network-tree merges, or cache serialization; queries use immutable snapshots on separate workers.
 - Superseded searches stop scanning, and serial cache saves retain the last fully applied filesystem-event checkpoint and the snapshot's exclusion fingerprint.
 - Live appends and deletions no longer copy the complete published index; canceled filename preparation releases obsolete mapped bases.

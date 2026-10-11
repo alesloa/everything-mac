@@ -2,7 +2,7 @@ import AppKit
 import IndexCore
 import UniformTypeIdentifiers
 
-enum ResultActions {
+@MainActor enum ResultActions {
     static func open(_ rec: FileRecord) { NSWorkspace.shared.open(URL(fileURLWithPath: rec.path)) }
     static func open(_ rec: FileRecord, with appURL: URL) {
         NSWorkspace.shared.open([URL(fileURLWithPath: rec.path)],

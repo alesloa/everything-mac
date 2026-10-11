@@ -84,7 +84,7 @@ struct ResultsTable: NSViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+    @MainActor final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
         var parent: ResultsTable
         weak var table: NSTableView?
         weak var openWithMenu: NSMenu?
@@ -102,6 +102,7 @@ struct ResultsTable: NSViewRepresentable {
         }
 
         func tableView(_ t: NSTableView, viewFor col: NSTableColumn?, row: Int) -> NSView? {
+            guard parent.rows.indices.contains(row) else { return nil }
             let rec = parent.rows[row]
             let key = col?.identifier.rawValue
             // Name column carries the file-type icon; everything else is text-only.
@@ -114,7 +115,7 @@ struct ResultsTable: NSViewRepresentable {
             let cell = textCell(t)
             switch key {
             case "path": cell.textField?.stringValue = rec.path
-            case "size": cell.textField?.stringValue = rec.isDir ? "--" : ByteCountFormatter.string(fromByteCount: Int64(rec.size), countStyle: .file)
+            case "size": cell.textField?.stringValue = rec.isDir ? "--" : Self.sizeText(rec.size)
             case "kind": cell.textField?.stringValue = FileIcons.kind(ext: Self.ext(rec.name), isDir: rec.isDir)
             case "mtime": cell.textField?.stringValue = Self.df.string(from: Date(timeIntervalSince1970: TimeInterval(rec.mtime)))
             default: break
@@ -123,6 +124,15 @@ struct ResultsTable: NSViewRepresentable {
         }
 
         private static func ext(_ name: String) -> String { (name as NSString).pathExtension.lowercased() }
+
+        private static func sizeText(_ bytes: UInt64) -> String {
+            // FileRecord/cache sizes are unsigned; ByteCountFormatter accepts only
+            // Int64. Preserve oversized values instead of trapping or clamping.
+            guard let signed = Int64(exactly: bytes) else {
+                return "\(bytes) \(UnitInformationStorage.bytes.symbol)"
+            }
+            return ByteCountFormatter.string(fromByteCount: signed, countStyle: .file)
+        }
 
         // Text-only reusable cell (path / size / kind / date columns).
         @MainActor private func textCell(_ t: NSTableView) -> NSTableCellView {

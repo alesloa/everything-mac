@@ -60,7 +60,11 @@ public enum MountTable {
     // network, so this is safe to call even while a share is stalled.
     public static func mounts() -> [Mount] {
         var mntbuf: UnsafeMutablePointer<statfs>? = nil
-        let count = getmntinfo(&mntbuf, MNT_NOWAIT)
+        // getmntinfo uses a process-wide buffer that other threads (including
+        // system frameworks) can overwrite or free while we copy its entries.
+        // The reentrant API transfers a private buffer to this caller.
+        let count = getmntinfo_r_np(&mntbuf, MNT_NOWAIT)
+        defer { free(mntbuf) }
         guard count > 0, let mntbuf else { return [] }
         var out: [Mount] = []
         for i in 0..<Int(count) {
