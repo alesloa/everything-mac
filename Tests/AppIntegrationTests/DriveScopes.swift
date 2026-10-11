@@ -145,11 +145,55 @@ private final class DriveMountFixture: @unchecked Sendable {
         try require(model.workspaceSnapshot.customFilterID == custom.id, "Saved custom filter selection was discarded")
         model.applySavedFilter(nil)
         try require(model.workspaceSnapshot.customFilterID == nil, "Saved custom filter could not be cleared")
-        try await capture(NSHostingView(rootView: SearchResultsArea(model: model)), size: NSSize(width: 850, height: 420),
-                          path: "/tmp/everything-drive-sidebar.png")
+        try await verifySidebarToggle(model)
         edit.indexBootVolume = false
         try await capture(NSHostingView(rootView: VolumesSettingsView(edit: edit, apply: {}).environmentObject(model)),
                           size: NSSize(width: 540, height: 480), path: "/tmp/everything-drive-settings.png")
+    }
+
+    @MainActor private static func verifySidebarToggle(_ model: AppModel) async throws {
+        let view = NSHostingView(rootView: ContentView().environmentObject(model))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 850, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = view; window.orderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(for: .milliseconds(150))
+        view.layoutSubtreeIfNeeded()
+        guard let expanded = sidebarToggle(in: view) else { throw failure("Expanded sidebar toggle is missing") }
+        let frame = expanded.convert(expanded.bounds, to: nil)
+        try require(expanded.state == .on, "Expanded toggle does not reflect the open sidebar")
+        expanded.performClick(nil)
+        try await waitUntil { !model.folderSidebarVisible && model.folderScope == nil && model.totalMatches == 3 }
+        view.layoutSubtreeIfNeeded()
+        guard let collapsed = sidebarToggle(in: view) else { throw failure("Collapsed sidebar toggle disappeared") }
+        let collapsedFrame = collapsed.convert(collapsed.bounds, to: nil)
+        try require(abs(collapsedFrame.minX - frame.minX) < 1 && abs(collapsedFrame.minY - frame.minY) < 1,
+                    "Sidebar toggle moved when the panel collapsed")
+        try require(collapsed.state == .off, "Collapsed toggle does not reflect the hidden sidebar")
+        try await screenshot(window, path: "/tmp/everything-drive-toggle-collapsed.png")
+        collapsed.performClick(nil)
+        try await waitUntil { model.folderSidebarVisible }
+        try require(model.folderScope == nil && model.query == "item.txt", "Expanding restored a forgotten folder or erased the query")
+        try await screenshot(window, path: "/tmp/everything-drive-toggle-expanded.png")
+    }
+
+    @MainActor private static func sidebarToggle(in root: NSView) -> NSButton? {
+        var remaining = [root]
+        while let view = remaining.popLast() {
+            if let button = view as? NSButton, button.identifier?.rawValue == "folder-sidebar-toggle" { return button }
+            remaining.append(contentsOf: view.subviews)
+        }
+        return nil
+    }
+
+    @MainActor private static func screenshot(_ window: NSWindow, path: String) async throws {
+        try await Task.sleep(for: .milliseconds(100))
+        window.contentView?.layoutSubtreeIfNeeded()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-x", "-l", String(window.windowNumber), path]
+        try process.run(); process.waitUntilExit()
+        try require(process.terminationStatus == 0, "Native UI capture failed")
     }
 
     private static func verifyDetachedShareRetention() throws {
@@ -193,7 +237,10 @@ private final class DriveMountFixture: @unchecked Sendable {
     }
 
     private static func require(_ condition: Bool, _ message: String) throws {
-        if !condition { throw NSError(domain: "DriveScopesTests", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+        if !condition { throw failure(message) }
+    }
+    private static func failure(_ message: String) -> Error {
+        NSError(domain: "DriveScopesTests", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
     @MainActor private static func waitUntil(_ condition: () async -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)

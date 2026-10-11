@@ -8,6 +8,7 @@ struct SearchField: View {
     @ObservedObject var model: AppModel
     var body: some View {
         HStack {
+            FolderSidebarToggle(model: model).frame(width: 28, height: 26)
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
             TextField("Search everything…", text: $text)
                 .textFieldStyle(.plain).font(.system(size: 15))

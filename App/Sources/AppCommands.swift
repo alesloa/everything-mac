@@ -108,6 +108,7 @@ struct AppCommands: Commands {
             Toggle("Folder Sidebar", isOn: Binding(get: { model.folderSidebarVisible }, set: {
                 model.setFolderSidebarVisible($0)
             }))
+                .keyboardShortcut("s", modifiers: [.command, .control])
             Toggle("Indexed Folder Totals", isOn: Binding(get: { model.indexedFolderTotals }, set: {
                 model.setFolderTotals($0)
             }))
