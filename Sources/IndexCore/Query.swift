@@ -1,55 +1,72 @@
+import Foundation
+
 public struct Query: Sendable, Equatable {
-    public var text: String
+    public var text: String { didSet { rebuildPlan() } }
     public var matchPath: Bool
     public var caseInsensitive: Bool
-    // When true, each plain (non-wildcard) term must match as a whole word — bounded by
-    // a non-alphanumeric character or a string edge — rather than as a loose substring.
     public var wholeWord: Bool
     public var fuzzy: Bool
+    public var regex: Bool { didSet { rebuildPlan() } }
+    public var diacriticInsensitive: Bool
+    public var matchPrefix: Bool
+    public var matchSuffix: Bool
+    public var ignorePunctuation: Bool
+    public var ignoreWhitespace: Bool
+    private let referenceDate: Date?
+    var plan: ParsedQuery
 
     public init(text: String, matchPath: Bool = false, caseInsensitive: Bool = true,
-                wholeWord: Bool = false, fuzzy: Bool = false) {
-        self.text = text
-        self.matchPath = matchPath
-        self.caseInsensitive = caseInsensitive
-        self.wholeWord = wholeWord
-        self.fuzzy = fuzzy
+                wholeWord: Bool = false, fuzzy: Bool = false, regex: Bool = false,
+                diacriticInsensitive: Bool = false, matchPrefix: Bool = false,
+                matchSuffix: Bool = false, ignorePunctuation: Bool = false,
+                ignoreWhitespace: Bool = false, referenceDate: Date? = nil) {
+        self.text = text; self.matchPath = matchPath; self.caseInsensitive = caseInsensitive
+        self.wholeWord = wholeWord; self.fuzzy = fuzzy; self.regex = regex
+        self.diacriticInsensitive = diacriticInsensitive; self.matchPrefix = matchPrefix
+        self.matchSuffix = matchSuffix; self.ignorePunctuation = ignorePunctuation
+        self.ignoreWhitespace = ignoreWhitespace; self.referenceDate = referenceDate
+        plan = QuerySyntax.parse(text, regex: regex, referenceDate: referenceDate ?? Date())
     }
 
-    public static func == (lhs: Query, rhs: Query) -> Bool {
-        // Literal/glob matching compares Unicode scalars. Swift String equality
-        // normalizes equivalent spellings, which would reuse the wrong matches.
-        lhs.text.utf8.elementsEqual(rhs.text.utf8)
-            && lhs.matchPath == rhs.matchPath && lhs.caseInsensitive == rhs.caseInsensitive
-            && lhs.wholeWord == rhs.wholeWord && lhs.fuzzy == rhs.fuzzy
+    private mutating func rebuildPlan() {
+        plan = QuerySyntax.parse(text, regex: regex, referenceDate: referenceDate ?? Date())
     }
 
-    // Whitespace-separated terms; quoted phrases kept intact.
+    // The error text comes from this parser's validation, including Foundation's
+    // actual regular-expression compile error when a regex cannot be compiled.
+    public var validationError: QueryValidationError? { plan.error }
     public var terms: [String] { tokens.map(\.text) }
-
     struct Token: Sendable {
         let text: String
         let quoted: Bool
         var isLiteral: Bool { quoted || text.contains("*") || text.contains("?") }
     }
+    var tokens: [Token] { plan.tokens }
+    var usesAdvancedEngine: Bool {
+        plan.advanced || regex || diacriticInsensitive || matchPrefix || matchSuffix
+            || ignorePunctuation || ignoreWhitespace || validationError != nil
+    }
+    var hasFuzzyTerms: Bool {
+        fuzzy && !wholeWord && !regex && !matchPrefix && !matchSuffix && plan.hasPlainTerms
+    }
 
-    var hasFuzzyTerms: Bool { fuzzy && !wholeWord && tokens.contains { !$0.isLiteral } }
+    func refreshingRelativeDates() -> Query {
+        guard referenceDate == nil, plan.relativeDates,
+              plan.dayAnchor != Calendar.current.startOfDay(for: Date()).timeIntervalSince1970 else { return self }
+        var updated = self
+        updated.rebuildPlan()
+        return updated
+    }
 
-    var tokens: [Token] {
-        var out: [Token] = []
-        var cur = ""
-        var inQuote = false
-        var quoted = false
-        for ch in text {
-            if ch == "\"" { inQuote.toggle(); quoted = true; continue }
-            if ch == " " && !inQuote {
-                if !cur.isEmpty { out.append(Token(text: cur, quoted: quoted)); cur = "" }
-                quoted = false
-            } else {
-                cur.append(ch)
-            }
-        }
-        if !cur.isEmpty { out.append(Token(text: cur, quoted: quoted)) }
-        return out
+    public static func == (lhs: Query, rhs: Query) -> Bool {
+        // Preserve scalar spellings used by literal matching, and expire relative
+        // date queries when their calendar-day anchor changes.
+        lhs.text.utf8.elementsEqual(rhs.text.utf8)
+            && lhs.matchPath == rhs.matchPath && lhs.caseInsensitive == rhs.caseInsensitive
+            && lhs.wholeWord == rhs.wholeWord && lhs.fuzzy == rhs.fuzzy && lhs.regex == rhs.regex
+            && lhs.diacriticInsensitive == rhs.diacriticInsensitive
+            && lhs.matchPrefix == rhs.matchPrefix && lhs.matchSuffix == rhs.matchSuffix
+            && lhs.ignorePunctuation == rhs.ignorePunctuation && lhs.ignoreWhitespace == rhs.ignoreWhitespace
+            && (!lhs.plan.relativeDates && !rhs.plan.relativeDates || lhs.plan.dayAnchor == rhs.plan.dayAnchor)
     }
 }

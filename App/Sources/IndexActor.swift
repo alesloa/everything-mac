@@ -7,6 +7,10 @@ struct NetworkShareStatus: Sendable, Equatable, Identifiable {
     let mountPath: String?
     let scanning: Bool
     let count: Int
+    var paused = false
+    var queued = false
+    var lastRefreshed: Date?
+    var refreshInterval: TimeInterval = NetworkShareRefreshPolicy.defaultInterval
     var id: String { share.id }
     var isOffline: Bool { mountPath == nil }
 }
@@ -17,8 +21,13 @@ struct NetworkShareStatus: Sendable, Equatable, Identifiable {
 actor IndexActor {
     typealias DiskScanner = @Sendable (ExcludeRules, @escaping @Sendable () -> Bool,
                                       @escaping @Sendable (Int) -> Void) -> FileStore
+    typealias ShareScanner = @Sendable (String, ExcludeRules, UInt32,
+                                       @escaping @Sendable () -> Bool,
+                                       @escaping @Sendable (Int) -> Void) -> FileStore
     private var store = FileStore()
     nonisolated let searchIndex = SearchIndex()
+    nonisolated private let activityJournal: IndexActivityJournal
+    private var activityShareRoots: [String: String] = [:]
     private let cacheWriter = IndexCacheWriter()
     private var cacheRevision: UInt64 = 0
     private var compactionID: UUID?
@@ -38,16 +47,22 @@ actor IndexActor {
     private var onProgress: (@Sendable (Int, UUID) -> Void)?
     private var onShareStatus: (@Sendable ([NetworkShareStatus]) -> Void)?
 
-    // Network shares seen mounted at the last check, and those with a scan in
-    // flight. A share is (re)scanned on every offline→online transition, which
-    // includes launch and a full rebuild, so a reconnect never serves stale entries
-    // for long while an offline share keeps its last-known entries searchable.
-    private var mountedShares: Set<String> = []
+    // Network scans publish complete replacements after reconnects and scheduled
+    // refreshes. Offline shares retain their last-known searchable snapshots.
     private var scanningShares: [String: Int] = [:]
     private var shareCounts: [String: Int] = [:]
     private var mountingShares: Set<String> = []
     private var shareScanIDs: [String: UUID] = [:]
     private var shareScanCancellations: [String: IndexScanCancellation] = [:]
+    // Keep physical workers counted until they actually return: cancelling a
+    // blocked smbfs syscall cannot interrupt it, and must not spawn more walkers.
+    private var shareWorkers: [String: UUID] = [:]
+    private var pendingShareRefresh: Set<String> = []
+    private var observedShareMountPaths: [String: String] = [:]
+    private var shareLastAttempt: [String: Date] = [:]
+    private var shareLastRefresh: [String: Date] = [:]
+    private var shareRefreshPolicies: [String: NetworkShareRefreshPolicy] = [:]
+    private static let maximumConcurrentShareScans = 2
     private var rebuildID: UUID?
     private var rebuildCancellation: IndexScanCancellation?
     private var previousReplayCheckpointBlocked: Bool?
@@ -55,15 +70,34 @@ actor IndexActor {
     private let preferences: UserDefaults
     private let configuredCacheURL: URL?
     private let diskScanner: DiskScanner
+    private let shareScanner: ShareScanner
+    private let networkMounts: @Sendable () -> [MountTable.Mount]
+    private let refreshClock: @Sendable () -> Date
 
     init(rules configuredRules: ExcludeRules? = nil, preferencesSuiteName: String? = nil,
          cacheURL: URL? = nil, diskScanner: DiskScanner? = nil,
+         shareScanner: ShareScanner? = nil,
+         networkMounts: @escaping @Sendable () -> [MountTable.Mount] = { MountTable.networkMounts() },
+         refreshClock: @escaping @Sendable () -> Date = { Date() },
+         activityCapacity: Int = IndexActivityJournal.defaultCapacity,
+         activityClock: @escaping @Sendable () -> Date = { Date() },
          onProgress: (@Sendable (Int, UUID) -> Void)? = nil) {
+        activityJournal = IndexActivityJournal(capacity: activityCapacity, clock: activityClock)
         let preferences = preferencesSuiteName.flatMap(UserDefaults.init(suiteName:)) ?? .standard
         self.preferences = preferences
         configuredCacheURL = cacheURL
         self.diskScanner = diskScanner ?? { rules, isCancelled, progress in
             ParallelScanner.scanWholeDisk(rules: rules, isCancelled: isCancelled, progress: progress)
+        }
+        self.shareScanner = shareScanner ?? { path, rules, volID, isCancelled, progress in
+            ParallelScanner.scan(root: path, rules: rules, volID: volID, workers: 4,
+                                 isCancelled: isCancelled, progress: progress)
+        }
+        self.networkMounts = networkMounts
+        self.refreshClock = refreshClock
+        if let data = preferences.data(forKey: "pref.networkShareRefreshPolicies"),
+           let policies = try? JSONDecoder().decode([String: NetworkShareRefreshPolicy].self, from: data) {
+            shareRefreshPolicies = policies
         }
         self.onProgress = onProgress
         if let configuredRules { rules = configuredRules; return }
@@ -74,6 +108,10 @@ actor IndexActor {
     }
 
     nonisolated var totalCount: Int { searchIndex.count }
+
+    // Memory-only reads bypass a writer blocked in a filesystem call.
+    nonisolated func activitySnapshot() -> IndexActivitySnapshot { activityJournal.snapshot() }
+    nonisolated func clearActivity() { activityJournal.clear() }
 
     // ~/Library/Application Support/Everything-Mac/index.idx
     static func cacheURL() -> URL {
@@ -88,9 +126,7 @@ actor IndexActor {
     // Validate on the actor, and keep the loaded store for startUp so a large cache
     // is neither decoded on the UI thread nor decoded twice during onboarding.
     func hasUsableCache() -> Bool {
-        guard let cache = try? IndexCache.load(from: cacheLocation()),
-              cache.0.count > 0, cache.2 == cacheFingerprint(),
-              !Self.isContaminated(cache.0) else { return false }
+        guard let cache = loadActivityCache() else { return false }
         preparedCache = cache
         return true
     }
@@ -105,6 +141,13 @@ actor IndexActor {
 
     private func publishStore() {
         searchIndex.publish(store)
+        let root = store.rootID == FileStore.noParent ? [] : [store.path(of: store.rootID)]
+        let shares = rules.networkShares.compactMap { share -> String? in
+            guard let path = activityShareRoots[share.source], let id = store.idForDirPath(path),
+                  store.volID(of: id) == share.volID else { return nil }
+            return store.path(of: id)
+        }
+        activityJournal.publishIndex(count: searchIndex.count, roots: root + shares.sorted())
         onLiveChange?()
         scheduleCompaction()
     }
@@ -137,6 +180,10 @@ actor IndexActor {
 
     func setRules(_ r: ExcludeRules) {
         if rules != r {
+            if let id = rebuildID {
+                // Source: setRules is the operation which cancelled this worker.
+                activityJournal.finishScan(id: id, outcome: .scanCancelled, detail: "Index rules changed.")
+            }
             rebuildCancellation?.cancel()
             invalidateShareScans()
             preparedCache = nil
@@ -184,11 +231,16 @@ actor IndexActor {
     }
 
     private func invalidateShareScans() {
+        for id in shareScanIDs.values {
+            // Source: the writer explicitly invalidated these active scan generations.
+            activityJournal.finishScan(id: id, outcome: .scanCancelled, detail: "Share scan invalidated.")
+        }
         for cancellation in shareScanCancellations.values { cancellation.cancel() }
         shareScanCancellations.removeAll()
         shareScanIDs.removeAll()
         scanningShares.removeAll()
-        mountedShares.removeAll()
+        observedShareMountPaths.removeAll()
+        pendingShareRefresh.removeAll()
     }
 
     // Mount points of non-local filesystems — network shares and automounter stubs.
@@ -203,10 +255,15 @@ actor IndexActor {
         // An overflow can arrive during an older rebuild. Superseding it must
         // carry that block forward until a replacement snapshot is accepted.
         previousReplayCheckpointBlocked = previousReplayCheckpointBlocked == true || replayCheckpointBlocked
+        if let previousID = rebuildID {
+            // Source: this rescanAll invocation replaces the previous active scan.
+            activityJournal.finishScan(id: previousID, outcome: .scanCancelled, detail: "Replaced by a newer scan.")
+        }
         rebuildCancellation?.cancel()
         let cancellation = IndexScanCancellation()
         rebuildCancellation = cancellation
         rebuildID = id
+        activityJournal.startScan(id: id, path: "/")
         replayCheckpointBlocked = false
         invalidateShareScans()
         publishShareStatus()
@@ -232,6 +289,8 @@ actor IndexActor {
         let newStore = await withTaskCancellationHandler { await worker.value } onCancel: {
             cancellation.cancel()
             worker.cancel()
+            // Source: task cancellation retires this result even if a syscall has not returned.
+            self.activityJournal.finishScan(id: id, outcome: .scanCancelled)
         }
         guard rebuildID == id else { return false }
         rebuildID = nil
@@ -239,6 +298,9 @@ actor IndexActor {
         // Partial local scans are deliberate without Full Disk Access. A cancelled
         // walk or an unreadable root must not replace the last searchable snapshot.
         guard !cancellation.isCancelled, !Task.isCancelled, newStore.count > 0 else {
+            activityJournal.finishScan(id: id,
+                outcome: cancellation.isCancelled || Task.isCancelled ? .scanCancelled : .scanFailed,
+                detail: cancellation.isCancelled || Task.isCancelled ? nil : "Scanner returned no entries.")
             replayCheckpointBlocked = replayCheckpointBlocked || previousReplayCheckpointBlocked == true
             previousReplayCheckpointBlocked = nil
             enqueueChanges([])
@@ -249,10 +311,11 @@ actor IndexActor {
         storeGeneration &+= 1
         lastEventID = scanEventID
         storeFingerprint = fingerprint
+        activityJournal.finishScan(id: id, outcome: newStore.scanCompleted ? .scanCompleted : .scanIncomplete,
+            detail: newStore.scanCompleted ? nil : "Scanner marked the result incomplete.", count: newStore.count)
         publishStore()
         enqueueChanges([])
         onProgress?(store.count, id)
-        mountedShares = []
         shareCounts = [:]
         for share in rules.networkShares { shareCounts[share.source] = store.liveCount(volID: share.volID) }
         checkNetworkShares()
@@ -262,6 +325,7 @@ actor IndexActor {
 
     private func scanProgress(_ count: Int, scanID: UUID) {
         guard rebuildID == scanID, rebuildCancellation?.isCancelled == false else { return }
+        activityJournal.scanProgress(id: scanID, count: count)
         onProgress?(count, scanID)
     }
 
@@ -275,13 +339,12 @@ actor IndexActor {
         self.onProgress = onProgress
         self.onShareStatus = onShareStatus
         liveRules = effectiveRules()   // before the monitor starts firing live reconciles
-        let url = cacheLocation()
         let fingerprint = cacheFingerprint()
         // Use the cache only if it was built with the SAME exclusion rules now in
         // effect. Otherwise (e.g. an upgrade that turned dev-folder skipping on, or a
         // changed exclude list) the cached index disagrees with the active rules and
         // would keep serving folders that should now be hidden — rebuild instead.
-        let cache = preparedCache ?? (try? IndexCache.load(from: url))
+        let cache = preparedCache ?? loadActivityCache()
         preparedCache = nil
         if let (loaded, evid, savedFingerprint) = cache,
            loaded.count > 0, savedFingerprint == fingerprint,
@@ -302,36 +365,98 @@ actor IndexActor {
 
     // MARK: - Network shares
 
-    // Compare the mount table with the last check and (re)scan any configured share
-    // that just became reachable. Cheap (no network I/O), so callers run it on a
-    // timer and on every /Volumes change.
+    // The existing mount-table timer also schedules refreshes while a share stays
+    // mounted. Reading this table uses MNT_NOWAIT and never contacts a server.
     func checkNetworkShares() {
         guard rebuildID == nil else { publishShareStatus(); return }
-        let mounts = MountTable.networkMounts()
-        var nowMounted: Set<String> = []
+        let mounts = networkMounts(), now = refreshClock()
         for share in rules.networkShares {
-            guard let mount = mounts.first(where: { $0.source == share.source }) else {
-                // A disconnected walk can still be blocked in network IO. Retire
-                // its generation now so later callbacks cannot revive its status.
-                shareScanCancellations.removeValue(forKey: share.source)?.cancel()
-                shareScanIDs[share.source] = nil
-                scanningShares[share.source] = nil
+            let source = share.source
+            guard let mount = mounts.first(where: { $0.source == source }) else {
+                retireShareScan(source)
+                pendingShareRefresh.remove(source)
+                observedShareMountPaths[source] = nil
                 continue
             }
-            nowMounted.insert(share.source)
-            if !mountedShares.contains(share.source) && scanningShares[share.source] == nil {
-                scanShare(share, at: mount.path)
-            }
+            let moved = observedShareMountPaths[source].map { !$0.utf8.elementsEqual(mount.path.utf8) } ?? true
+            if moved { retireShareScan(source) }
+            observedShareMountPaths[source] = mount.path
+            let policy = currentShareRefreshPolicy(for: share)
+            guard !policy.paused else { continue }
+            let elapsed = shareLastAttempt[source].map { now.timeIntervalSince($0) }
+            let due = elapsed.map { $0 < 0 || $0 >= policy.interval } ?? true
+            if (moved || due), shareScanIDs[source] == nil { pendingShareRefresh.insert(source) }
         }
-        mountedShares = nowMounted
+        dispatchShareRefreshes(mounts: mounts, now: now)
         publishShareStatus()
+    }
+
+    func currentShareRefreshPolicy(for share: NetworkShare) -> NetworkShareRefreshPolicy {
+        shareRefreshPolicies[share.source] ?? NetworkShareRefreshPolicy()
+    }
+
+    func setShareRefreshPolicy(_ policy: NetworkShareRefreshPolicy, for share: NetworkShare) {
+        guard rules.networkShares.contains(where: { $0.source == share.source }) else { return }
+        let previous = currentShareRefreshPolicy(for: share)
+        shareRefreshPolicies[share.source] = policy
+        if let data = try? JSONEncoder().encode(shareRefreshPolicies) {
+            preferences.set(data, forKey: "pref.networkShareRefreshPolicies")
+        }
+        if policy.paused {
+            retireShareScan(share.source)
+            pendingShareRefresh.remove(share.source)
+        } else if previous.paused {
+            pendingShareRefresh.insert(share.source)
+        }
+        checkNetworkShares()
+    }
+
+    // A manual refresh is allowed while scheduling is paused. Its result still
+    // replaces the share only after the entire snapshot passes validation.
+    func refreshShare(_ share: NetworkShare) {
+        guard rebuildID == nil, rules.networkShares.contains(where: { $0.source == share.source }),
+              shareScanIDs[share.source] == nil,
+              networkMounts().contains(where: { $0.source == share.source }) else { return }
+        pendingShareRefresh.insert(share.source)
+        dispatchShareRefreshes(mounts: networkMounts(), now: refreshClock())
+        publishShareStatus()
+    }
+
+    func cancelShareRefresh(_ share: NetworkShare) {
+        retireShareScan(share.source)
+        pendingShareRefresh.remove(share.source)
+        shareLastAttempt[share.source] = refreshClock()
+        publishShareStatus()
+    }
+
+    private func retireShareScan(_ source: String) {
+        if let id = shareScanIDs[source] {
+            // Source: this writer action retires the currently active share scan.
+            activityJournal.finishScan(id: id, outcome: .scanCancelled)
+        }
+        shareScanCancellations.removeValue(forKey: source)?.cancel()
+        shareScanIDs[source] = nil
+        scanningShares[source] = nil
+    }
+
+    private func dispatchShareRefreshes(mounts: [MountTable.Mount], now: Date) {
+        guard rebuildID == nil else { return }
+        for share in rules.networkShares where pendingShareRefresh.contains(share.source) {
+            guard shareWorkers.count < Self.maximumConcurrentShareScans else { break }
+            guard shareWorkers[share.source] == nil,
+                  let mount = mounts.first(where: { $0.source == share.source }) else { continue }
+            pendingShareRefresh.remove(share.source)
+            shareLastAttempt[share.source] = now
+            observedShareMountPaths[share.source] = mount.path
+            scanShare(share, at: mount.path)
+        }
     }
 
     // Mount every configured share that is currently unreachable. Called on launch,
     // on wake and from Settings — never on the periodic check, which would fight a
     // user who just ejected the share on purpose.
     func reconnectShares() {
-        let mounted = Set(MountTable.networkMounts().map(\.source))
+        let mounted = Set(networkMounts().map(\.source))
         for share in rules.networkShares where !mounted.contains(share.source) {
             reconnectShare(share)
         }
@@ -342,7 +467,7 @@ actor IndexActor {
     // the configured rules after the connection succeeds.
     func reconnectShare(_ share: NetworkShare) {
         guard let url = share.url, !mountingShares.contains(share.source),
-              MountTable.mountPath(forSource: share.source) == nil else { return }
+              !networkMounts().contains(where: { $0.source == share.source }) else { return }
         mountingShares.insert(share.source)
         Task {
             let ok = await Task.detached(priority: .utility) { NetworkMounter.mount(url) }.value
@@ -358,15 +483,16 @@ actor IndexActor {
     private func scanShare(_ share: NetworkShare, at mountPath: String) {
         let scanID = UUID()
         let cancellation = IndexScanCancellation()
+        shareWorkers[share.source] = scanID
         shareScanIDs[share.source] = scanID
         shareScanCancellations[share.source] = cancellation
         scanningShares[share.source] = 0
+        activityJournal.startScan(id: scanID, path: mountPath)
         let userRules = rules
-        let volID = share.volID
+        let volID = share.volID, scanner = shareScanner
         Task {
             let sub = await Task.detached(priority: .utility) {
-                ParallelScanner.scan(root: mountPath, rules: userRules, volID: volID, workers: 4,
-                                     isCancelled: { cancellation.isCancelled }) { count in
+                scanner(mountPath, userRules, volID, { cancellation.isCancelled }) { count in
                     Task { await self.shareScanProgress(share.source, scanID: scanID, count: count) }
                 }
             }.value
@@ -377,6 +503,7 @@ actor IndexActor {
     private func shareScanProgress(_ source: String, scanID: UUID, count: Int) {
         guard shareScanIDs[source] == scanID else { return }
         scanningShares[source] = count
+        activityJournal.scanProgress(id: scanID, count: count)
         publishShareStatus()
     }
 
@@ -385,35 +512,65 @@ actor IndexActor {
     private func finishShareScan(_ share: NetworkShare, scanID: UUID, at mountPath: String, with sub: FileStore) {
         // A rebuild or rule change invalidates the old scan. Its completion and
         // progress must never overwrite a newer scan or reintroduce excluded files.
-        guard shareScanIDs[share.source] == scanID else { return }
+        guard shareWorkers[share.source] == scanID else { return }
+        shareWorkers[share.source] = nil
+        guard shareScanIDs[share.source] == scanID else {
+            checkNetworkShares()
+            return
+        }
+        shareLastAttempt[share.source] = refreshClock()
         shareScanIDs[share.source] = nil
         shareScanCancellations[share.source] = nil
         scanningShares[share.source] = nil
-        defer { publishShareStatus() }
+        defer { checkNetworkShares() }
         guard rules.networkShares.contains(share),
-              let currentMountPath = MountTable.mountPath(forSource: share.source),
+              let currentMountPath = networkMounts().first(where: { $0.source == share.source })?.path,
               currentMountPath.utf8.elementsEqual(mountPath.utf8) else {
-            mountedShares.remove(share.source)
+            activityJournal.finishScan(id: scanID, outcome: .scanCancelled,
+                detail: "Configured share or mounted path changed.")
             return
         }
         guard ShareIndexMutation.replace(share, at: mountPath, with: sub, in: &store) else {
-            mountedShares.remove(share.source)
+            let detail: String
+            // Sources: these labels describe the returned scanner fields and graft validation.
+            if sub.count == 0 { detail = "Scanner returned no entries." }
+            else if !sub.scanCompleted { detail = "Scanner marked the result incomplete." }
+            else { detail = "Scanner result could not replace the indexed share." }
+            activityJournal.finishScan(id: scanID, outcome: sub.scanCompleted ? .scanFailed : .scanIncomplete,
+                                       detail: detail, count: sub.count)
             return
         }
         shareCounts[share.source] = sub.count
+        activityShareRoots[share.source] = mountPath
+        shareLastRefresh[share.source] = refreshClock()
+        activityJournal.finishScan(id: scanID, outcome: .scanCompleted, count: sub.count)
         publishStore()
         Task { await flush() }
     }
 
-    private func publishShareStatus() {
-        let mounts = MountTable.networkMounts()
-        let status = rules.networkShares.map { share in
-            NetworkShareStatus(share: share,
-                               mountPath: mounts.first { $0.source == share.source }?.path,
-                               scanning: scanningShares[share.source] != nil,
-                               count: scanningShares[share.source] ?? shareCounts[share.source] ?? 0)
+    func networkShareStatuses() -> [NetworkShareStatus] {
+        let mounts = networkMounts()
+        return rules.networkShares.map { share in
+            let policy = currentShareRefreshPolicy(for: share)
+            return NetworkShareStatus(share: share,
+                mountPath: mounts.first { $0.source == share.source }?.path,
+                scanning: scanningShares[share.source] != nil,
+                count: scanningShares[share.source] ?? shareCounts[share.source] ?? 0,
+                paused: policy.paused, queued: pendingShareRefresh.contains(share.source),
+                lastRefreshed: shareLastRefresh[share.source], refreshInterval: policy.interval)
         }
-        onShareStatus?(status)
+    }
+
+    private func publishShareStatus() {
+        let statuses = networkShareStatuses()
+        activityJournal.publishShares(statuses.map { status in
+            IndexActivityShare(id: status.id, name: status.share.name, mountPath: status.mountPath,
+                indexedPath: activityShareRoots[status.id], indexedCount: shareCounts[status.id],
+                observedCount: shareScanIDs[status.id].flatMap { activityJournal.scanProgressCount(id: $0) },
+                scanning: status.scanning, paused: status.paused, queued: status.queued,
+                lastRefreshed: status.lastRefreshed)
+        })
+        onShareStatus?(statuses)
     }
 
     // A clean scan excludes the Data volume's firmlink back-door, so a healthy index
@@ -483,7 +640,12 @@ actor IndexActor {
             if c.mustScanSubtree { pendingDeep.insert(p) }
             // A volume-wide overflow is only reconciled shallowly. Keep replaying
             // from the previous safe checkpoint until a full rebuild covers it.
-            if c.mustScanSubtree && Self.isVolumeRoot(p) { replayCheckpointBlocked = true }
+            if c.mustScanSubtree && Self.isVolumeRoot(p) {
+                // Source: FSEvents' MustScanSubDirs flag requests a volume-wide replay.
+                activityJournal.record(.replayIncomplete, path: p,
+                    detail: "FSEvents requested a volume-wide rescan; this live pass checks one directory level.")
+                replayCheckpointBlocked = true
+            }
         }
         // A drain is already pending or running — it will sweep up what we just added.
         guard rebuildID == nil, !drainScheduled, !draining else { return }
@@ -544,7 +706,7 @@ actor IndexActor {
                     }
                     if LiveMonitor.reconcileLevel(directory: dir, in: &store, rules: liveRules, volID: 1,
                                                   descend: descend, newlyIndexedDirs: &newlyIndexed,
-                                                  pushChildDirsTo: &stack) { changed = true }
+                                                  pushChildDirsTo: &stack, observe: recordObservation) { changed = true }
                     processed += 1
                     // Publish progress in coherent batches and give actor control
                     // operations a turn; searching itself never waits on this yield.
@@ -587,7 +749,7 @@ actor IndexActor {
         var changed = false
         for dir in targets {
             if LiveMonitor.reconcile(directory: dir, in: &store, rules: liveRules, volID: 1,
-                                     newlyIndexedDirs: &newlyIndexed) { changed = true }
+                                     newlyIndexedDirs: &newlyIndexed, observe: recordObservation) { changed = true }
         }
         guard changed else { return }
         publishStore()
@@ -601,7 +763,47 @@ actor IndexActor {
         // Keep the last safely applied checkpoint; the current system event id
         // can include directories still waiting in our coalesced event queue.
         cacheRevision &+= 1
-        try? await cacheWriter.save(store.storageSnapshot(), to: cacheLocation(), lastEventID: lastEventID,
-                                    rulesFingerprint: fingerprint, revision: cacheRevision)
+        let url = cacheLocation()
+        activityJournal.recordCache(.cacheSaveStarted, path: url.path)
+        do {
+            let saved = try await cacheWriter.save(store.storageSnapshot(), to: url, lastEventID: lastEventID,
+                                                   rulesFingerprint: fingerprint, revision: cacheRevision)
+            let metadata = saved ? Self.cacheMetadata(url) : (nil, nil)
+            activityJournal.recordCache(saved ? .cacheSaved : .cacheSaveSuperseded, path: url.path,
+                                         byteCount: metadata.0, modifiedAt: metadata.1)
+        } catch {
+            activityJournal.recordCache(.cacheSaveFailed, path: url.path, detail: error.localizedDescription)
+        }
+    }
+
+    private func recordObservation(_ observation: ReconcileObservation) {
+        activityJournal.recordObservation(observation)
+    }
+
+    private func loadActivityCache() -> (FileStore, UInt64, UInt64)? {
+        let url = cacheLocation()
+        activityJournal.recordCache(.cacheLoadStarted, path: url.path)
+        do {
+            let cache = try IndexCache.load(from: url)
+            // Sources: validation uses the decoded cache count, fingerprint and root lookup.
+            let reason: String?
+            if cache.0.count == 0 { reason = "Cache contains no entries." }
+            else if cache.2 != cacheFingerprint() { reason = "Cache exclusion rules differ from the current rules." }
+            else if Self.isContaminated(cache.0) { reason = "Cache contains the excluded Data-volume alias." }
+            else { reason = nil }
+            let metadata = Self.cacheMetadata(url)
+            activityJournal.recordCache(reason == nil ? .cacheLoaded : .cacheRejected, path: url.path, detail: reason,
+                                         byteCount: metadata.0, modifiedAt: metadata.1)
+            return reason == nil ? cache : nil
+        } catch {
+            activityJournal.recordCache(.cacheLoadFailed, path: url.path, detail: error.localizedDescription)
+            return nil
+        }
+    }
+
+    private static func cacheMetadata(_ url: URL) -> (UInt64?, Date?) {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return (nil, nil) }
+        // Source: FileManager's attributes of the actual cache file supply both values.
+        return ((attributes[.size] as? NSNumber)?.uint64Value, attributes[.modificationDate] as? Date)
     }
 }

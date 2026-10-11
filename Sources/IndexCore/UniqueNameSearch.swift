@@ -7,6 +7,9 @@ extension QueryEngine {
                 nameIndex: UniqueNameIndex?,
                 isCancelled: @escaping @Sendable () -> Bool = { false }) -> [UInt32] {
         guard !isCancelled() else { return [] }
+        if query.usesAdvancedEngine {
+            return advancedMatches(query, in: store, candidates: candidates, isCancelled: isCancelled).map(\.id)
+        }
         if query.hasFuzzyTerms {
             return matches(query, in: store, candidates: candidates, nameIndex: nameIndex,
                            isCancelled: isCancelled).map(\.id)

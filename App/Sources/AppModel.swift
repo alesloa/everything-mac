@@ -8,12 +8,21 @@ final class AppModel: ObservableObject {
     @Published var query = ""
     @Published var results: [FileRecord] = [] {
         didSet {
+            let recordsByID = Dictionary(results.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            selectedRecords = selectedRecords.compactMap { selected in
+                guard let current = recordsByID[selected.id],
+                      current.path.utf8.elementsEqual(selected.path.utf8) else { return nil }
+                return current
+            }
             if selectedID != nil && selected == nil {
-                selectedID = nil
+                selectedID = selectedRecords.first?.id
             }
         }
     }
     @Published var total = 0
+    @Published var indexRevision: UInt64 = 0
+    @Published var totalMatches: Int?
+    @Published var resultSnapshotID: UUID?
     @Published var sortKey: QueryEngine.SortKey = .relevance
     @Published var ascending = true
     @Published var matchPath = false
@@ -23,6 +32,24 @@ final class AppModel: ObservableObject {
     @Published var caseSensitive = false
     @Published var wholeWord = false
     @Published var fuzzy = true
+    @Published var regex = false
+    @Published var diacriticInsensitive = false
+    @Published var matchPrefix = false
+    @Published var matchSuffix = false
+    @Published var ignorePunctuation = false
+    @Published var ignoreWhitespace = false
+    @Published var searchFilter: SearchFilter = .all
+    @Published var searchError: String?
+    @Published var activePanel: AppFeaturePanel?
+    @Published var previewVisible = false
+    @Published var thumbnailView = false
+    @Published var previewAllowsNetwork = false
+    @Published var folderScope: FolderScope?
+    @Published var folderSidebarVisible = false
+    @Published var indexedFolderTotals = false
+    @Published var indexedTotalsColumnOverride: Bool?
+    lazy var folderDetails = FolderDetailsModel(index: index.searchIndex)
+    @Published var selectedRecords: [FileRecord] = []
     // Max rows handed to the table — the old hardcoded 5000 cap, now user-tunable.
     @Published var resultLimit = 5000
     @Published var rules: ExcludeRules = .defaults
@@ -46,8 +73,13 @@ final class AppModel: ObservableObject {
         return results.first { $0.id == id && $0.path.utf8.elementsEqual(path.utf8) }
     }
 
+    var actionRecords: [FileRecord] {
+        selectedRecords.isEmpty ? selected.map { [$0] } ?? [] : selectedRecords
+    }
+
     let index: IndexActor
-    private let preferences: UserDefaults
+    let preferences: UserDefaults
+    let workspace: SearchWorkspaceController
     private var task: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
     private var flushTimer: Task<Void, Never>?
@@ -57,13 +89,27 @@ final class AppModel: ObservableObject {
     private var bootstrapped = false
     private var indexStarted = false
     private var searchSeq = 0
-    private var searchTask: Task<[FileRecord], Never>?
+    private var searchTask: Task<SearchReport, Never>?
     private var rebuildTask: Task<Void, Never>?
     private var activeScanID: UUID?
+    private weak var backgroundOwner: AppModel?
+    private var backgroundSubscriptions: Set<AnyCancellable> = []
+    private var loadedCatalogStore: CatalogStore?
 
-    init(index: IndexActor = IndexActor(), preferences: UserDefaults = .standard) {
+    var catalogStore: CatalogStore {
+        if let backgroundOwner { return backgroundOwner.catalogStore }
+        if let loadedCatalogStore { return loadedCatalogStore }
+        let store = CatalogStore(nativeIndex: index.searchIndex)
+        loadedCatalogStore = store
+        return store
+    }
+
+    init(index: IndexActor = IndexActor(), preferences: UserDefaults = .standard,
+         workspace: SearchWorkspaceController? = nil) {
         self.index = index
         self.preferences = preferences
+        self.workspace = workspace ?? SearchWorkspaceController(library:
+            preferences === UserDefaults.standard ? .shared : WorkspaceLibrary(preferences: preferences))
     }
 
     func bootstrap() {
@@ -88,7 +134,37 @@ final class AppModel: ObservableObject {
         startIndex()
     }
 
+    // Windows have independent search state while one owner starts and updates
+    // the shared index. Only the owner runs filesystem timers and rebuilds.
+    func prepareWindow(with background: AppModel) {
+        guard !bootstrapped else { return }
+        bootstrapped = true
+        backgroundOwner = background
+        loadPrefs()
+        total = background.total; scanning = background.scanning; shares = background.shares
+        rules = background.rules; fdaGranted = background.fdaGranted
+        awaitingFullDiskAccess = background.awaitingFullDiskAccess
+        background.$total.sink { [weak self] value in self?.total = value }
+            .store(in: &backgroundSubscriptions)
+        background.$scanning.sink { [weak self] value in self?.scanning = value }
+            .store(in: &backgroundSubscriptions)
+        background.$shares.sink { [weak self] value in self?.shares = value }
+            .store(in: &backgroundSubscriptions)
+        background.$rules.sink { [weak self] value in self?.rules = value }
+            .store(in: &backgroundSubscriptions)
+        background.$fdaGranted.sink { [weak self] value in self?.fdaGranted = value }
+            .store(in: &backgroundSubscriptions)
+        background.$awaitingFullDiskAccess.sink { [weak self] value in self?.awaitingFullDiskAccess = value }
+            .store(in: &backgroundSubscriptions)
+        background.$indexRevision.sink { [weak self] revision in
+            self?.indexRevision = revision
+            self?.refreshFolderDetailsIfNeeded()
+            Task { @MainActor [weak self] in await self?.runSearch() }
+        }.store(in: &backgroundSubscriptions)
+    }
+
     func continueWithoutFullDiskAccess() {
+        if let backgroundOwner { backgroundOwner.continueWithoutFullDiskAccess(); return }
         fdaPollTask?.cancel()
         awaitingFullDiskAccess = false
         startIndex()
@@ -134,6 +210,7 @@ final class AppModel: ObservableObject {
                 scanning = false
                 total = index.totalCount
                 rules = currentRules
+                indexDidChange()
                 await runSearch()
             }
             startFlushTimer()
@@ -187,6 +264,7 @@ final class AppModel: ObservableObject {
 
     func queryChanged() {
         savePrefs()   // also captures a Match-path toggle (shares this entry point)
+        workspaceStateChanged()
         task?.cancel()
         searchTask?.cancel()
         searchSeq &+= 1
@@ -211,18 +289,35 @@ final class AppModel: ObservableObject {
         searchTask?.cancel()
         searchSeq &+= 1
         let mySeq = searchSeq
-        let query = query, matchPath = matchPath, caseInsensitive = !caseSensitive
-        let wholeWord = wholeWord, fuzzy = fuzzy, sort = sortKey, ascending = ascending, limit = resultLimit
+        let query: Query
+        do { query = try resolvedWorkspaceQuery() }
+        catch {
+            // Source: the saved-query expansion's actual error for this workspace.
+            searchError = error.localizedDescription; results = []; totalMatches = 0; resultSnapshotID = nil; return
+        }
+        if let error = query.validationError {
+            // Source: the parser's validation error for the owner's entered query.
+            searchError = error.localizedDescription
+            results = []
+            totalMatches = 0; resultSnapshotID = nil
+            return
+        }
+        searchError = nil
+        let sort = sortKey, ascending = ascending, limit = resultLimit, scope = folderScope
         let worker = Task {
-            await index.search(query, matchPath: matchPath, caseInsensitive: caseInsensitive,
-                               wholeWord: wholeWord, fuzzy: fuzzy, sort: sort, ascending: ascending, limit: limit)
+            await index.searchIndex.searchReport(query, sort: sort, ascending: ascending, limit: limit, scope: scope)
         }
         searchTask = worker
         let r = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
         // Only the most recently started search may publish — stops a slower
         // in-flight search (e.g. from a live-refresh tick) clobbering newer
         // results with a stale sort order.
-        if mySeq == searchSeq && !Task.isCancelled && !worker.isCancelled { results = r }
+        if mySeq == searchSeq && !Task.isCancelled && !worker.isCancelled {
+            results = r.records
+            totalMatches = r.totalMatches
+            resultSnapshotID = r.snapshotID
+            recordCompletedWorkspaceSearch()
+        }
     }
 
     // Coalesce bursts of FSEvents into at most one refresh per 200ms.
@@ -232,8 +327,14 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 200_000_000)
             if Task.isCancelled { return }
             if !scanning { total = index.totalCount }
+            indexDidChange()
             await runSearch()
         }
+    }
+
+    private func indexDidChange() {
+        indexRevision &+= 1
+        loadedCatalogStore?.refreshNative()
     }
 
     private func startFlushTimer() {
@@ -250,6 +351,64 @@ final class AppModel: ObservableObject {
 
     func focusSearch() { focusSearchSignal &+= 1 }
 
+    func setFolderScope(_ scope: FolderScope?) {
+        folderScope = scope
+        workspaceStateChanged()
+        Task { await runSearch() }
+    }
+
+    func setFolderTotals(_ visible: Bool) {
+        indexedFolderTotals = visible
+        indexedTotalsColumnOverride = visible
+        savePrefs()
+        refreshFolderDetailsIfNeeded()
+    }
+
+    func indexedColumnsChanged(_ visible: Bool) {
+        indexedTotalsColumnOverride = nil
+        guard indexedFolderTotals != visible else { return }
+        indexedFolderTotals = visible
+        savePrefs()
+        refreshFolderDetailsIfNeeded()
+    }
+
+    func refreshFolderDetailsIfNeeded() {
+        if indexedFolderTotals || folderSidebarVisible { folderDetails.refresh() }
+        else { folderDetails.cancel() }
+    }
+
+    func selectRecords(_ records: [FileRecord]) {
+        let recordsByID = Dictionary(results.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        selectedRecords = records.filter { selected in
+            recordsByID[selected.id]?.path.utf8.elementsEqual(selected.path.utf8) == true
+        }
+        selectedID = selectedRecords.first?.id
+        updateQuickLookSelection()
+    }
+
+    func updateQuickLookSelection() {
+        guard let window = NSApp.mainWindow ?? NSApp.keyWindow,
+              SearchWindowRegistry.shared.model(for: window) === self else { return }
+        QuickLookController.shared.updateSelection(actionRecords, allowsNetwork: previewAllowsNetwork)
+    }
+
+    var currentQuery: Query {
+        let base = Query(text: query, matchPath: matchPath,
+              caseInsensitive: !caseSensitive, wholeWord: wholeWord, fuzzy: fuzzy,
+              regex: regex, diacriticInsensitive: diacriticInsensitive,
+              matchPrefix: matchPrefix, matchSuffix: matchSuffix,
+              ignorePunctuation: ignorePunctuation, ignoreWhitespace: ignoreWhitespace)
+        return searchFilter.applying(to: base)
+    }
+
+    var featureQueryResult: Result<Query, Error> {
+        do {
+            let resolved = try resolvedWorkspaceQuery()
+            if let error = resolved.validationError { throw error }
+            return .success(resolved)
+        } catch { return .failure(error) }
+    }
+
     // MARK: - Search preference persistence (UserDefaults)
 
     func loadPrefs() {
@@ -259,6 +418,20 @@ final class AppModel: ObservableObject {
         wholeWord = d.bool(forKey: "pref.wholeWord")
         let hasFuzzyPref = d.object(forKey: "pref.fuzzy") != nil
         fuzzy = hasFuzzyPref ? d.bool(forKey: "pref.fuzzy") : true
+        regex = d.bool(forKey: "pref.regex")
+        diacriticInsensitive = d.bool(forKey: "pref.diacriticInsensitive")
+        matchPrefix = d.bool(forKey: "pref.matchPrefix")
+        matchSuffix = d.bool(forKey: "pref.matchSuffix")
+        ignorePunctuation = d.bool(forKey: "pref.ignorePunctuation")
+        ignoreWhitespace = d.bool(forKey: "pref.ignoreWhitespace")
+        if let name = d.string(forKey: "pref.searchFilter"), let filter = SearchFilter(rawValue: name) {
+            searchFilter = filter
+        }
+        previewVisible = d.bool(forKey: "pref.previewVisible")
+        thumbnailView = d.bool(forKey: "pref.thumbnailView")
+        previewAllowsNetwork = d.bool(forKey: "pref.previewAllowsNetwork")
+        folderSidebarVisible = d.bool(forKey: "pref.folderSidebarVisible")
+        indexedFolderTotals = d.bool(forKey: "pref.indexedFolderTotals")
         let lim = d.integer(forKey: "pref.resultLimit")
         resultLimit = lim > 0 ? lim : 5000
         if hasFuzzyPref {
@@ -273,9 +446,22 @@ final class AppModel: ObservableObject {
         d.set(caseSensitive, forKey: "pref.caseSensitive")
         d.set(wholeWord, forKey: "pref.wholeWord")
         d.set(fuzzy, forKey: "pref.fuzzy")
+        d.set(regex, forKey: "pref.regex")
+        d.set(diacriticInsensitive, forKey: "pref.diacriticInsensitive")
+        d.set(matchPrefix, forKey: "pref.matchPrefix")
+        d.set(matchSuffix, forKey: "pref.matchSuffix")
+        d.set(ignorePunctuation, forKey: "pref.ignorePunctuation")
+        d.set(ignoreWhitespace, forKey: "pref.ignoreWhitespace")
+        d.set(searchFilter.rawValue, forKey: "pref.searchFilter")
+        d.set(previewVisible, forKey: "pref.previewVisible")
+        d.set(thumbnailView, forKey: "pref.thumbnailView")
+        d.set(previewAllowsNetwork, forKey: "pref.previewAllowsNetwork")
+        d.set(folderSidebarVisible, forKey: "pref.folderSidebarVisible")
+        d.set(indexedFolderTotals, forKey: "pref.indexedFolderTotals")
         d.set(resultLimit, forKey: "pref.resultLimit")
         d.set(Self.sortKeyName(sortKey), forKey: "pref.sortKey")
         d.set(ascending, forKey: "pref.ascending")
+        workspaceStateChanged()
     }
 
     // SortKey has no rawValue (the byte comparators don't need one); map it by hand
@@ -305,11 +491,13 @@ final class AppModel: ObservableObject {
     // but without changing the exclude rules — for when the index drifts or the user
     // wants to be sure it's fresh. Persists the result so the next launch matches.
     func rebuildIndex() {
+        if let backgroundOwner { backgroundOwner.rebuildIndex(); return }
         guard !scanning else { return }
         beginRebuild(rules: nil)
     }
 
     func applyRules(_ newRules: ExcludeRules) {
+        if let backgroundOwner { backgroundOwner.applyRules(newRules); return }
         beginRebuild(rules: newRules)
     }
 
@@ -335,6 +523,7 @@ final class AppModel: ObservableObject {
             rebuildTask = nil
             scanning = false
             total = index.totalCount
+            indexDidChange()
             await runSearch()
         }
     }

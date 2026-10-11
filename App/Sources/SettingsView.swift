@@ -52,6 +52,9 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             SearchSettingsView()
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
+            // Source: saved workspace preferences held by WorkspaceLibrary.
+            WorkspaceSettingsView(library: model.workspace.library)
+                .tabItem { Label("Workspace", systemImage: "rectangle.3.group") }
             ExcludeSettingsView(edit: edit, apply: apply)
                 .tabItem { Label("Exclude", systemImage: "nosign") }
             VolumesSettingsView(edit: edit, apply: apply)

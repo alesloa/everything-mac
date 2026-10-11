@@ -18,6 +18,9 @@ public struct QueryEngine: Sendable {
                        candidates: [UInt32]? = nil,
                        isCancelled: @escaping @Sendable () -> Bool = { false }) -> [UInt32] {
         if isCancelled() { return [] }
+        if query.usesAdvancedEngine {
+            return advancedMatches(query, in: store, candidates: candidates, isCancelled: isCancelled).map(\.id)
+        }
         if query.hasFuzzyTerms { return matches(query, in: store, candidates: candidates, isCancelled: isCancelled).map(\.id) }
         let ids = rawSearch(query, in: store, candidates: candidates, isCancelled: isCancelled)
         guard !isCancelled() else { return [] }

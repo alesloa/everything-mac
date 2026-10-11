@@ -21,16 +21,23 @@ final class StoreBytes: @unchecked Sendable {
         // A corrupted/replaced cache path may be a FIFO. Never wait for a writer
         // before fstat can reject it; O_NONBLOCK does not alter regular files.
         let fd = open((isolated ? clone : url).path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)
-        guard fd >= 0 else { throw IndexCache.CacheError() }
+        // Filesystem failures preserve the actual POSIX error and requested path.
+        guard fd >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: url.path])
+        }
         defer { close(fd) }
         var info = stat()
-        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
-              info.st_size > 0, info.st_size <= Int.max else {
-            throw IndexCache.CacheError()
+        guard fstat(fd, &info) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: url.path])
+        }
+        guard (info.st_mode & S_IFMT) == S_IFREG, info.st_size > 0, info.st_size <= Int.max else {
+            throw IndexCache.CacheError("The saved index is not a nonempty regular file of supported size.")
         }
         count = Int(info.st_size)
         let pointer = mmap(nil, count, PROT_READ, MAP_PRIVATE, fd, 0)
-        guard pointer != MAP_FAILED, let pointer else { throw IndexCache.CacheError() }
+        guard pointer != MAP_FAILED, let pointer else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: url.path])
+        }
         address = UnsafeRawPointer(pointer)
         mapped = true
         isIsolatedMapping = isolated

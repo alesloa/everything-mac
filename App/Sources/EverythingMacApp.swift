@@ -4,36 +4,14 @@ import AppKit
 @main
 struct EverythingMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model = AppModel()
+    @StateObject private var background = AppModel()
     var body: some Scene {
-        WindowGroup("Everything-Mac") {
-            ContentView().environmentObject(model)
-                .frame(minWidth: 800, minHeight: 500)
-                .onAppear {
-                    appDelegate.model = model
-                    model.bootstrap()
-                }
+        WindowGroup("Everything-Mac", id: "search", for: String.self) { windowID in
+            SearchWindowRoot(background: background, delegate: appDelegate, windowID: windowID.wrappedValue)
         }
-        .commands { AppCommands(model: model) }
+        .commands { FocusedSearchCommands() }
         Settings {
-            SettingsView().environmentObject(model)
+            SearchSettingsRoot(background: background, delegate: appDelegate)
         }
-    }
-}
-
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    weak var model: AppModel?
-
-    func applicationWillTerminate(_ notification: Notification) {
-        guard let index = model?.index else { return }
-        let sem = DispatchSemaphore(value: 0)
-        Task.detached {
-            await index.flush()
-            sem.signal()
-        }
-        // Bounded wait so a slow flush (large index) or an actor busy mid-scan
-        // can't hang the quit. Correctness holds either way: the next launch
-        // replays FSEvents since the last successful flush.
-        _ = sem.wait(timeout: .now() + 5)
     }
 }

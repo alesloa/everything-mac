@@ -23,9 +23,14 @@ So I wrote my own. It reads every filename on the machine into memory and search
 - Fuzzy filename search enabled by default, with relevance ranking and an exact substring-search switch in the search bar. Quotes, wildcards, and Match Whole Word retain exact matching semantics.
 - Searches local volumes and selected network shares, updating on each keystroke.
 - Indexes the whole disk, files and folders, and keeps the index current through FSEvents.
-- Standard results table with Name, Path, Size, Kind, and Date Modified. Click a header to sort.
+- Results table with sortable Name, Path, Size, Kind, and Date Modified, persisted column layouts, exact match counts, and highlighted matches. Optional Indexed Size and Files columns summarize indexed descendants.
 - Shows the real file-type icon and a readable kind for each row.
-- Right-click menu: Open, Open With (lists every app associated with the file, plus a "Choose Application…" option to open it with anything), Reveal in Finder, Copy Path, Copy Name, Move to Trash.
+- Multi-file Open, Open With, Reveal in Finder, clipboard, copy/move, rename and batch rename, Finder Get Info, and Move to Trash. Undo checks that its original targets have not changed.
+- Advanced queries, file-type filters, saved searches, reusable macros, history, and independent search tabs and windows restored across launches.
+- Quick Look with Space, an optional preview pane, and a thumbnail grid that loads visible results.
+- A menu bar item and configurable global shortcut in Settings. Indexing continues with the search windows closed.
+- An optional indexed folder sidebar and recursive totals, computed from the published index rather than filesystem reads for each row.
+- Tools for portable file catalogs, scoped exports, verified duplicates, folder comparison, content search, and index activity.
 - Handles millions of files with parallel search, shared filename scoring, and reuse of prior candidates as you keep typing.
 - First-launch onboarding waits for Full Disk Access before scanning, with an option to continue without it.
 - Opt-in network-volume indexing in Settings > Volumes. Selected shares are scanned in the background, retain cached results while offline, and reconnect at launch and after sleep using credentials already saved in the keychain.
@@ -60,9 +65,10 @@ swift test -c release
 ```
 
 The native app checks exercise selection and context-menu targets through live
-refreshes, overlapping rebuild cancellation, quoted TSV export, and preservation
-of known network files after incomplete scans. They use temporary fixtures and
-inspect action targets without opening or deleting files.
+refreshes, overlapping rebuild cancellation, file operations and guarded undo,
+quoted TSV export, and preservation of known network files after incomplete
+scans. They use temporary fixtures and inspect launch targets without opening
+owner files.
 
 The regressions in [`StartupSafetyTests.swift`](Tests/IndexCoreTests/StartupSafetyTests.swift)
 and [`TableSafety.swift`](Tests/AppIntegrationTests/TableSafety.swift) exercise watcher
@@ -121,11 +127,43 @@ The first launch scans the whole disk and writes the index to a cache, so it tak
 
 In Settings > Volumes, choose **Add Network Volume…**, select a mounted share or a folder on it, then click **Apply & Re-index**. The whole share is indexed separately from local drives. Automatic reconnection requires credentials already saved by Finder.
 
-Network shares refresh when they reconnect or when you rebuild the index. Changes made while a share stays mounted do not appear live. Cached results can still be searched when a share is offline; opening a result requires the share to be reachable.
+Selected shares refresh every five minutes by default, after reconnecting, or when you rebuild the index. Settings > Volumes offers per-share refresh intervals, pause, manual refresh, and cancellation. Cached results remain searchable during refresh and while a share is offline; opening a result requires the share to be reachable.
 
 ## Using it
 
 Launch it and start typing. Matches show up right away. Click a column header to sort. Double-click a row to open it, or right-click for Open With, Reveal in Finder, Copy Path, Move to Trash, and the rest.
+
+### Queries and saved searches
+
+Use **Search > Advanced Search** for the query builder, or enter query operators directly. Examples from the implemented query parser:
+
+```text
+ext:pdf size:>1mb
+folder: report
+(ext:swift | ext:md) !path:node_modules
+regex:"report[0-9]+"
+```
+
+Quoted words use literal matching. Boolean groups, metadata predicates, and search options share the same behavior in native search, catalogs, and the command-line tool where metadata is available. Invalid queries display their actual validation error. Save the current search from **Bookmarks**, and use **History** to revisit searches. Each tab and window retains its own query, options, folder scope, and sort order.
+
+### Previews, totals, and file tools
+
+Select files and press Space for Quick Look. **View > Preview**, **Thumbnails**, **Folder Sidebar**, and **Indexed Folder Totals** enable the corresponding views. Folder totals describe indexed descendants, so exclusions and unavailable metadata affect them. Preview and thumbnail reads skip network files by default; the network-read option is explicit.
+
+**File > Export Results** exports selected rows, shown rows, or every match from the current immutable snapshot, including matches beyond the display limit. **Tools > File Catalogs** imports portable lists and keeps unavailable catalog metadata absent. Windows catalog paths require an explicit mapping before native file actions. See [FILE_CATALOGS.md](FILE_CATALOGS.md).
+
+**Tools > Find Duplicates** verifies file contents and compares folder trees. It does not delete files automatically. **Tools > Search File Contents** searches supported text and PDF files on demand, with bounded workers, cancellation, and file-size limits. Network content reads require opt-in; cloud and dataless files are skipped. **Tools > Index Activity** shows observed indexing events and status without blocking filename searches.
+
+### Command line
+
+Build the `everything` SwiftPM executable for searches against the existing saved index. It never scans the disk or writes the cache:
+
+```bash
+swift build -c release --product everything
+.build/release/everything --help
+```
+
+See [COMMAND_LINE.md](COMMAND_LINE.md) for query, sort, scope, export, and pipeline options. Building does not install the executable in your PATH.
 
 ## How it works
 

@@ -8,22 +8,30 @@ struct ResultsTable: NSViewRepresentable {
     var onSort: (QueryEngine.SortKey, Bool) -> Void
     var onSelect: (FileRecord?) -> Void
     var onActivate: (FileRecord) -> Void
+    var onSelection: (([FileRecord]) -> Void)? = nil
+    var onPreview: (([FileRecord]) -> Void)? = nil
+    var selectedRecords: [FileRecord]? = nil
+    var query: Query? = nil
+    var folderTotals: FolderSnapshot? = nil
+    var sortKey: QueryEngine.SortKey? = nil
+    var ascending = true
+    var showIndexedTotals: Bool? = nil
+    var onIndexedTotalsVisibilityChanged: ((Bool) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let table = NSTableView()
-        for (key, title, width) in [("name","Name",260),("path","Path",380),("size","Size",90),("kind","Kind",130),("mtime","Date Modified",160)] {
-            let col = NSTableColumn(identifier: .init(key))
-            col.title = title; col.width = CGFloat(width)
-            col.sortDescriptorPrototype = NSSortDescriptor(key: key, ascending: true)
-            table.addTableColumn(col)
-        }
+        let table = ResultsKeyTableView()
+        table.onResultKey = context.coordinator.handleResultKey
+        context.coordinator.table = table
+        context.coordinator.installColumns(in: table)
         table.dataSource = context.coordinator
         table.delegate = context.coordinator
         table.target = context.coordinator
         table.doubleAction = #selector(Coordinator.doubleClicked(_:))
         table.usesAlternatingRowBackgroundColors = true
+        table.allowsMultipleSelection = true
+        table.setDraggingSourceOperationMask([.copy, .move, .link], forLocal: false)
 
         // Right-click context menu — items target the coordinator; coordinator
         // pins the clicked record before tracking starts. The
@@ -48,6 +56,12 @@ struct ResultsTable: NSViewRepresentable {
         add("Reveal in Finder", #selector(Coordinator.ctxReveal))
         add("Copy Path", #selector(Coordinator.ctxCopyPath))
         add("Copy Name", #selector(Coordinator.ctxCopyName))
+        add("Copy Files", #selector(Coordinator.ctxCopyFiles))
+        add("Paste Files…", #selector(Coordinator.ctxPasteFiles))
+        add("Copy To…", #selector(Coordinator.ctxCopyTo))
+        add("Move To…", #selector(Coordinator.ctxMoveTo))
+        add("Rename…", #selector(Coordinator.ctxRename))
+        add("Get Info", #selector(Coordinator.ctxGetInfo))
         menu.addItem(.separator())
         add("Move to Trash", #selector(Coordinator.ctxTrash))
         table.menu = menu
@@ -55,6 +69,7 @@ struct ResultsTable: NSViewRepresentable {
         let scroll = NSScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
         context.coordinator.table = table
         return scroll
     }
@@ -63,42 +78,89 @@ struct ResultsTable: NSViewRepresentable {
         context.coordinator.reload(self)
     }
 
-    @MainActor final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+    @MainActor final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate, NSMenuItemValidation {
         var parent: ResultsTable
         weak var table: NSTableView?
         weak var openWithMenu: NSMenu?
         weak var contextMenu: NSMenu?
-        private var contextRecord: FileRecord?
+        weak var columnsMenu: NSMenu?
+        let columnDefaults: UserDefaults
+        var columnLayout: ResultsColumnLayout
+        var suppressColumnPersistence = false
+        var lastIndexedTotalsVisibility: Bool?
+        var highlightTask: Task<Void, Never>?
+        var highlightRequest = UUID()
+        var highlightPrepared = false
+        var highlights: [SelectionIdentity: RecordHighlights] = [:]
+        private var contextRecords: [FileRecord] = []
         var suppressSelectionCallback = false
-        init(_ p: ResultsTable) { parent = p }
+        var suppressSortCallback = false
+        init(_ p: ResultsTable, columnDefaults: UserDefaults = .standard) {
+            parent = p
+            self.columnDefaults = columnDefaults
+            columnLayout = ResultsColumnLayout.load(from: columnDefaults)
+        }
+        deinit { highlightTask?.cancel() }
 
         func numberOfRows(in tableView: NSTableView) -> Int { parent.rows.count }
 
         func reload(_ next: ResultsTable) {
-            let selected: FileRecord? = table.flatMap { table in
-                parent.rows.indices.contains(table.selectedRow) ? parent.rows[table.selectedRow] : nil
-            }
+            let selected = next.selectedRecords ?? selectedRecords()
+            let updateHighlights = parent.query != next.query || !Self.sameRows(parent.rows, next.rows)
+            let updateTotalsVisibility = parent.showIndexedTotals != next.showIndexedTotals
             parent = next
+            if updateTotalsVisibility { applyIndexedTotalsOverride() }
+            applySortIndicators()
             suppressSelectionCallback = true
             defer { suppressSelectionCallback = false }
             table?.reloadData()
-            if let selected, let row = parent.rows.firstIndex(where: {
-                $0.id == selected.id && $0.path.utf8.elementsEqual(selected.path.utf8)
-            }) {
-                table?.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            } else {
-                // Rebuilds reuse numeric IDs. Never keep the highlight on a new
-                // file that happens to occupy the old record's slot or row.
-                table?.deselectAll(nil)
-            }
+            let identities = Set(selected.map { SelectionIdentity($0) })
+            let indexes = IndexSet(parent.rows.indices.filter { identities.contains(SelectionIdentity(parent.rows[$0])) })
+            // Rebuilds reuse IDs; every selected row must also keep its exact path bytes.
+            if indexes.isEmpty { table?.deselectAll(nil) }
+            else { table?.selectRowIndexes(indexes, byExtendingSelection: false) }
+            if updateHighlights || !highlightPrepared { prepareHighlights() }
         }
 
         // Report the user's row pick up to the model so the menu bar can act on it.
         // Skipped during programmatic reselection (see updateNSView).
         func tableViewSelectionDidChange(_ notification: Notification) {
-            guard !suppressSelectionCallback, let t = table else { return }
-            let r = t.selectedRow
-            parent.onSelect(r >= 0 && r < parent.rows.count ? parent.rows[r] : nil)
+            guard !suppressSelectionCallback else { return }
+            let records = selectedRecords()
+            parent.onSelect(records.first)
+            parent.onSelection?(records)
+        }
+
+        func selectedRecords() -> [FileRecord] {
+            guard let table else { return [] }
+            return table.selectedRowIndexes.compactMap { parent.rows.indices.contains($0) ? parent.rows[$0] : nil }
+        }
+
+        func handleResultKey(_ action: ResultsKeyAction) -> Bool {
+            let records = selectedRecords()
+            switch action {
+            case .preview:
+                guard !records.isEmpty, let onPreview = parent.onPreview else { return false }
+                onPreview(records)
+            case .open:
+                guard !records.isEmpty else { return false }
+                ResultActions.open(records)
+            case .copy:
+                guard !records.isEmpty else { return false }
+                ResultActions.copyFiles(records)
+            case .paste:
+                guard ResultActions.canPasteFiles else { return false }
+                ResultActions.pasteFiles(into: records.count == 1 ? records.first : nil)
+            case .undo:
+                guard ResultActions.state.canUndo, !ResultActions.state.isBusy else { return false }
+                ResultActions.undoLastOperation()
+            }
+            return true
+        }
+
+        func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+            guard parent.rows.indices.contains(row) else { return nil }
+            return URL(fileURLWithPath: parent.rows[row].path) as NSURL
         }
 
         func tableView(_ t: NSTableView, viewFor col: NSTableColumn?, row: Int) -> NSView? {
@@ -108,14 +170,21 @@ struct ResultsTable: NSViewRepresentable {
             // Name column carries the file-type icon; everything else is text-only.
             if key == "name" {
                 let cell = nameCell(t)
-                cell.textField?.stringValue = rec.name
+                applyText(rec.name, ranges: highlights[SelectionIdentity(rec)]?.name ?? [], to: cell.textField)
                 cell.imageView?.image = FileIcons.icon(ext: Self.ext(rec.name), isDir: rec.isDir)
                 return cell
             }
             let cell = textCell(t)
             switch key {
-            case "path": cell.textField?.stringValue = rec.path
-            case "size": cell.textField?.stringValue = rec.isDir ? "--" : Self.sizeText(rec.size)
+            // Row names, paths, dates, bytes and file counts come from FileRecord
+            // or the matching immutable indexed folder snapshot.
+            case "path": applyText(rec.path, ranges: highlights[SelectionIdentity(rec)]?.path ?? [], to: cell.textField)
+            case "size":
+                cell.textField?.stringValue = Self.sizeText(rec.size)
+            case "indexedSize":
+                let bytes = rec.isDir ? parent.folderTotals?.totals(for: rec)?.bytes : rec.size
+                cell.textField?.stringValue = bytes.map(Self.sizeText) ?? ""
+            case "fileCount": cell.textField?.stringValue = parent.folderTotals?.totals(for: rec)?.fileCount.formatted() ?? ""
             case "kind": cell.textField?.stringValue = FileIcons.kind(ext: Self.ext(rec.name), isDir: rec.isDir)
             case "mtime": cell.textField?.stringValue = Self.df.string(from: Date(timeIntervalSince1970: TimeInterval(rec.mtime)))
             default: break
@@ -175,6 +244,7 @@ struct ResultsTable: NSViewRepresentable {
         }
 
         func tableView(_ t: NSTableView, sortDescriptorsDidChange old: [NSSortDescriptor]) {
+            guard !suppressSortCallback else { return }
             guard let d = t.sortDescriptors.first, let k = d.key else { return }
             let key: QueryEngine.SortKey = ["name":.name,"path":.path,"size":.size,"kind":.kind,"mtime":.mtime][k] ?? .name
             parent.onSort(key, d.ascending)
@@ -189,15 +259,36 @@ struct ResultsTable: NSViewRepresentable {
         func clickedRecord() -> FileRecord? {
             // The main menu captures the file before tracking starts. Live results
             // can reorder while the menu is open; actions keep the clicked path.
-            if contextMenu != nil { return contextRecord }
+            if contextMenu != nil { return contextRecords.first }
             guard let r = table?.clickedRow, r >= 0, r < parent.rows.count else { return nil }
             return parent.rows[r]
         }
-        @objc func ctxOpen()     { if let r = clickedRecord() { ResultActions.open(r) } }
-        @objc func ctxReveal()   { if let r = clickedRecord() { ResultActions.reveal(r) } }
-        @objc func ctxCopyPath() { if let r = clickedRecord() { ResultActions.copyPath(r) } }
-        @objc func ctxCopyName() { if let r = clickedRecord() { ResultActions.copyName(r) } }
-        @objc func ctxTrash()    { if let r = clickedRecord() { ResultActions.trash(r) } }
+        func clickedRecords() -> [FileRecord] {
+            if contextMenu != nil { return contextRecords }
+            return clickedRecord().map { [$0] } ?? []
+        }
+        @objc func ctxOpen()     { ResultActions.open(clickedRecords()) }
+        @objc func ctxReveal()   { ResultActions.reveal(clickedRecords()) }
+        @objc func ctxCopyPath() { ResultActions.copyPath(clickedRecords()) }
+        @objc func ctxCopyName() { ResultActions.copyName(clickedRecords()) }
+        @objc func ctxTrash()    { ResultActions.trash(clickedRecords()) }
+        @objc func ctxCopyFiles() { ResultActions.copyFiles(clickedRecords()) }
+        @objc func ctxPasteFiles() { ResultActions.pasteFiles(into: clickedRecords().count == 1 ? clickedRecord() : nil) }
+        @objc func ctxCopyTo() { ResultActions.copyTo(clickedRecords()) }
+        @objc func ctxMoveTo() { ResultActions.moveTo(clickedRecords()) }
+        @objc func ctxRename() { ResultActions.rename(clickedRecords()) }
+        @objc func ctxGetInfo() { ResultActions.getInfo(clickedRecords()) }
+
+        func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+            if menuItem.action == #selector(toggleColumn(_:)) {
+                guard let key = menuItem.representedObject as? String,
+                      let column = table?.tableColumns.first(where: { $0.identifier.rawValue == key }) else { return false }
+                return column.isHidden || (table?.tableColumns.filter({ !$0.isHidden }).count ?? 0) > 1
+            }
+            guard !clickedRecords().isEmpty, !ResultActions.state.isBusy else { return false }
+            if menuItem.action == #selector(ctxPasteFiles) { return ResultActions.canPasteFiles }
+            return true
+        }
 
         // Notepad Studio is always pinned in the submenu so any file — even one with
         // no associated app — can be opened with it. Resolved by bundle id at runtime
@@ -209,10 +300,14 @@ struct ResultsTable: NSViewRepresentable {
         // marked), then the pinned editor, then a "Choose Application…" picker — so
         // there's always something to open with. Chosen app rides on representedObject.
         func menuNeedsUpdate(_ menu: NSMenu) {
+            if menu === columnsMenu { updateColumnMenu(); return }
             if menu === contextMenu {
                 if let row = table?.clickedRow, parent.rows.indices.contains(row) {
-                    contextRecord = parent.rows[row]
-                } else { contextRecord = nil }
+                    contextRecords = table?.selectedRowIndexes.contains(row) == true ? selectedRecords() : [parent.rows[row]]
+                } else { contextRecords = [] }
+                for item in menu.items where item.action != nil {
+                    item.isEnabled = !contextRecords.isEmpty && !ResultActions.state.isBusy
+                }
                 return
             }
             guard menu === openWithMenu else { return }
@@ -248,14 +343,15 @@ struct ResultsTable: NSViewRepresentable {
         }
 
         @objc func ctxOpenWith(_ sender: NSMenuItem) {
-            guard let r = clickedRecord(), let app = sender.representedObject as? URL else { return }
-            ResultActions.open(r, with: app)
+            guard let app = sender.representedObject as? URL else { return }
+            ResultActions.open(clickedRecords(), with: app)
         }
 
         // Browse for any app to open the file with (Finder's "Open With ▸ Other…").
         // Capture the pinned record before the panel's nested event loop.
         @objc func ctxOpenWithChoose() {
-            guard let r = clickedRecord() else { return }
+            let records = clickedRecords()
+            guard !records.isEmpty else { return }
             let panel = NSOpenPanel()
             panel.title = "Choose Application"
             panel.directoryURL = URL(fileURLWithPath: "/Applications")
@@ -263,10 +359,51 @@ struct ResultsTable: NSViewRepresentable {
             panel.allowsMultipleSelection = false
             panel.canChooseDirectories = false
             if panel.runModal() == .OK, let app = panel.url {
-                ResultActions.open(r, with: app)
+                ResultActions.open(records, with: app)
             }
         }
 
         static let df: DateFormatter = { let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short; return f }()
+    }
+}
+
+// Keyboard actions are scoped to the results view as first responder. Field
+// editors and search fields keep Space, Return and standard text commands.
+enum ResultsKeyAction: Equatable {
+    case preview, open, copy, paste, undo
+
+    static func action(for event: NSEvent, isResultsFirstResponder: Bool) -> Self? {
+        guard isResultsFirstResponder, event.type == .keyDown else { return nil }
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if modifiers.isEmpty {
+            if event.keyCode == 49 { return .preview }
+            if event.keyCode == 36 || event.keyCode == 76 { return .open }
+        }
+        if modifiers == .command {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "c": return .copy
+            case "v": return .paste
+            case "z": return .undo
+            default: break
+            }
+        }
+        return nil
+    }
+}
+
+@MainActor final class ResultsKeyTableView: NSTableView {
+    var onResultKey: ((ResultsKeyAction) -> Bool)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command),
+           let action = ResultsKeyAction.action(for: event, isResultsFirstResponder: window?.firstResponder === self),
+           onResultKey?(action) == true { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if let action = ResultsKeyAction.action(for: event, isResultsFirstResponder: window?.firstResponder === self),
+           onResultKey?(action) == true { return }
+        super.keyDown(with: event)
     }
 }

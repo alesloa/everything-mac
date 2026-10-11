@@ -18,5 +18,7 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>EverythingMac asks Finder to show information about the files you select.</string>
 </dict>
 </plist>

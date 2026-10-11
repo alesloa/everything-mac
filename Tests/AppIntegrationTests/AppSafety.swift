@@ -35,6 +35,14 @@ import IndexCore
         model.results = [second]
         precondition(model.selected == nil)
 
+        model.results = [first, second]
+        model.selectRecords([first, second])
+        precondition(model.selectedRecords == [first, second])
+        model.results = [second, first]
+        precondition(model.selectedRecords.map(\.path) == [first.path, second.path])
+        model.results = [second, reused]
+        precondition(model.selectedRecords == [second], "ID reuse redirected a multiple-file operation")
+
         let composed = record(9, "/fixture/caf\u{E9}.txt")
         let decomposed = record(9, "/fixture/cafe\u{301}.txt")
         precondition(!composed.path.utf8.elementsEqual(decomposed.path.utf8))
@@ -43,6 +51,10 @@ import IndexCore
         model.results = [decomposed]
         precondition(model.selectedID == nil && model.selected == nil,
                      "Canonically equivalent path text redirected actions to different path bytes")
+        model.results = [composed]
+        model.selectRecords([composed])
+        model.results = [decomposed]
+        precondition(model.selectedRecords.isEmpty, "Multiple selection accepted a different Unicode path")
 
         func tableView(_ rows: [FileRecord]) -> ResultsTable {
             ResultsTable(rows: rows, onSort: { _, _ in }, onSelect: { _ in }, onActivate: { _ in })
