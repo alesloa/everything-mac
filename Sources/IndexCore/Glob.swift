@@ -98,6 +98,15 @@ public extension Glob {
         where Bytes.Element == UInt8, Bytes.Index == Int {
         let hasWildcard = pattern.contains(0x2A) || pattern.contains(0x3F)
         if hasWildcard {
+            // '?' denotes one Unicode scalar, not one byte of a multibyte name.
+            // Keep ASCII-only folding so literal letters retain the fast path's
+            // semantics and its character-mask prefilter remains conservative.
+            if pattern.contains(0x3F), hay.contains(where: { $0 >= 0x80 }) {
+                let scalars = String(decoding: Array(hay), as: UTF8.self).unicodeScalars.map {
+                    $0.value < 0x80 ? Unicode.Scalar(fold(UInt8($0.value))) : $0
+                }
+                return globMatch(pattern: pattern.map { Unicode.Scalar($0) }, text: scalars)
+            }
             return bytesGlobMatch(pattern: pattern, hay: hay)
         } else {
             return bytesContains(hay: hay, needle: pattern)

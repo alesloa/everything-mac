@@ -78,7 +78,7 @@ extension QueryEngine {
             for term in terms {
                 switch term {
                 case .ascii(let pattern):
-                    guard let value = pattern.score(name, nameMask: mask) else { return nil }
+                    guard let value = pattern.score(name, nameMask: mask, matchPath: query.matchPath) else { return nil }
                     score += value
                 case .unicode(let pattern):
                     if string == nil { string = store.name(of: id) }
@@ -247,6 +247,7 @@ extension QueryEngine {
                 }
             }
         }
-        return heap.sorted(by: earlier).map(\.id)
+        let result = heap.sorted(by: earlier).map(\.id)
+        return isCancelled() ? [] : result
     }
 }
