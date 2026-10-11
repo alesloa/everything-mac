@@ -12,6 +12,7 @@ struct VolumesSettingsView: View {
     @State private var volumes: [VolumeInfo] = []
     @State private var mountedShares: [MountTable.Mount] = []
     @State private var shareNotice: String?
+    @State private var refreshPolicies: [String: NetworkShareRefreshPolicy] = [:]
 
     struct VolumeInfo: Identifiable {
         let id = UUID()
@@ -42,20 +43,53 @@ struct VolumesSettingsView: View {
                     Text("None").foregroundStyle(.secondary)
                 }
                 ForEach(edit.networkShares) { share in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(share.name)
-                            Text(shareDetail(share)).font(.caption).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(share.name)
+                                Text(shareDetail(share)).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if let status = shareStatus(share), status.scanning || status.queued {
+                                Button("Cancel") { Task { await model.index.cancelShareRefresh(share) } }
+                                    .buttonStyle(.borderless)
+                            } else {
+                                Button("Refresh") { Task { await model.index.refreshShare(share) } }
+                                    .buttonStyle(.borderless)
+                                    .disabled(!isApplied(share) || mountPath(of: share) == nil)
+                            }
+                            if mountPath(of: share) == nil, share.url != nil {
+                                Button("Connect") { model.reconnectShare(share); refreshMounts(after: 3) }
+                                    .buttonStyle(.borderless)
+                            }
+                            Button(role: .destructive) { edit.networkShares.removeAll { $0.source == share.source } } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
                         }
-                        Spacer()
-                        if mountPath(of: share) == nil, share.url != nil {
-                            Button("Connect") { model.reconnectShare(share); refreshMounts(after: 3) }
-                                .buttonStyle(.borderless)
+                        HStack {
+                            Toggle("Pause automatic refresh", isOn: pauseBinding(share))
+                                .toggleStyle(.checkbox)
+                            Spacer()
+                            Picker("Refresh every", selection: intervalBinding(share)) {
+                                ForEach(NetworkShareRefreshPolicy.intervals, id: \.self) { interval in
+                                    Text(Duration.seconds(interval).formatted(.units(allowed: [.hours, .minutes], width: .wide)))
+                                        .tag(interval)
+                                }
+                            }
+                            .frame(maxWidth: 240)
                         }
-                        Button(role: .destructive) { edit.networkShares.removeAll { $0.source == share.source } } label: {
-                            Image(systemName: "minus.circle")
+                        .disabled(!isApplied(share))
+                        if let status = shareStatus(share), status.scanning {
+                            Text("Indexing… \(status.count.formatted()) objects")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else if let status = shareStatus(share), status.queued {
+                            Text("Refresh queued")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else if let refreshed = shareStatus(share)?.lastRefreshed {
+                            Text("Last refreshed \(refreshed.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.borderless)
                     }
                 }
                 Button("Add Network Volume…") { addNetworkVolume() }
@@ -65,7 +99,9 @@ struct VolumesSettingsView: View {
             } header: {
                 Text("Network volumes")
             } footer: {
-                Text("A network volume is indexed while it's mounted and indexed again each time it reconnects. Its files stay searchable while it is offline, and the app reconnects it at launch and after sleep.")
+                // Scheduling values come from NetworkShareRefreshPolicy; progress
+                // and completion dates above come from IndexActor's scan status.
+                Text("Mounted volumes refresh in the background on this schedule and after reconnecting. Pausing stops automatic refresh; Refresh runs one scan. Cached files stay searchable while a volume is offline. Apply changes before managing a newly added volume.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Excluded folders") {
@@ -97,12 +133,52 @@ struct VolumesSettingsView: View {
         }
         .formStyle(.grouped)
         .padding(20)
-        .onAppear { volumes = Self.localVolumes(); mountedShares = MountTable.networkMounts() }
+        .onAppear {
+            volumes = Self.localVolumes()
+            mountedShares = MountTable.networkMounts()
+            loadRefreshPolicies()
+        }
         .onChange(of: model.shares) { mountedShares = MountTable.networkMounts() }
+        .onChange(of: model.rules.networkShares) { loadRefreshPolicies() }
     }
 
     private func mountPath(of share: NetworkShare) -> String? {
         mountedShares.first { $0.source == share.source }?.path
+    }
+
+    private func shareStatus(_ share: NetworkShare) -> NetworkShareStatus? {
+        model.shares.first { $0.share.source == share.source }
+    }
+
+    private func isApplied(_ share: NetworkShare) -> Bool {
+        model.rules.networkShares.contains { $0.source == share.source }
+    }
+
+    private func loadRefreshPolicies() {
+        Task {
+            for share in model.rules.networkShares {
+                refreshPolicies[share.source] = await model.index.currentShareRefreshPolicy(for: share)
+            }
+        }
+    }
+
+    private func updatePolicy(_ policy: NetworkShareRefreshPolicy, for share: NetworkShare) {
+        refreshPolicies[share.source] = policy
+        Task { await model.index.setShareRefreshPolicy(policy, for: share) }
+    }
+
+    private func pauseBinding(_ share: NetworkShare) -> Binding<Bool> {
+        Binding(get: { (refreshPolicies[share.source] ?? NetworkShareRefreshPolicy()).paused }, set: { paused in
+            let previous = refreshPolicies[share.source] ?? NetworkShareRefreshPolicy()
+            updatePolicy(NetworkShareRefreshPolicy(paused: paused, interval: previous.interval), for: share)
+        })
+    }
+
+    private func intervalBinding(_ share: NetworkShare) -> Binding<TimeInterval> {
+        Binding(get: { (refreshPolicies[share.source] ?? NetworkShareRefreshPolicy()).interval }, set: { interval in
+            let previous = refreshPolicies[share.source] ?? NetworkShareRefreshPolicy()
+            updatePolicy(NetworkShareRefreshPolicy(paused: previous.paused, interval: interval), for: share)
+        })
     }
 
     private func shareDetail(_ share: NetworkShare) -> String {
