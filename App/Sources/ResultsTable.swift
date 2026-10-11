@@ -9,11 +9,14 @@ struct ResultsTable: NSViewRepresentable {
     var onSelect: (FileRecord?) -> Void
     var onActivate: (FileRecord) -> Void
     var onSelection: (([FileRecord]) -> Void)? = nil
+    var onPreview: (([FileRecord]) -> Void)? = nil
+    var selectedRecords: [FileRecord]? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let table = NSTableView()
+        let table = ResultsKeyTableView()
+        table.onResultKey = context.coordinator.handleResultKey
         for (key, title, width) in [("name","Name",260),("path","Path",380),("size","Size",90),("kind","Kind",130),("mtime","Date Modified",160)] {
             let col = NSTableColumn(identifier: .init(key))
             col.title = title; col.width = CGFloat(width)
@@ -84,7 +87,7 @@ struct ResultsTable: NSViewRepresentable {
         func numberOfRows(in tableView: NSTableView) -> Int { parent.rows.count }
 
         func reload(_ next: ResultsTable) {
-            let selected = selectedRecords()
+            let selected = next.selectedRecords ?? selectedRecords()
             parent = next
             suppressSelectionCallback = true
             defer { suppressSelectionCallback = false }
@@ -108,6 +111,28 @@ struct ResultsTable: NSViewRepresentable {
         func selectedRecords() -> [FileRecord] {
             guard let table else { return [] }
             return table.selectedRowIndexes.compactMap { parent.rows.indices.contains($0) ? parent.rows[$0] : nil }
+        }
+
+        func handleResultKey(_ action: ResultsKeyAction) -> Bool {
+            let records = selectedRecords()
+            switch action {
+            case .preview:
+                guard !records.isEmpty, let onPreview = parent.onPreview else { return false }
+                onPreview(records)
+            case .open:
+                guard !records.isEmpty else { return false }
+                ResultActions.open(records)
+            case .copy:
+                guard !records.isEmpty else { return false }
+                ResultActions.copyFiles(records)
+            case .paste:
+                guard ResultActions.canPasteFiles else { return false }
+                ResultActions.pasteFiles(into: records.count == 1 ? records.first : nil)
+            case .undo:
+                guard ResultActions.state.canUndo, !ResultActions.state.isBusy else { return false }
+                ResultActions.undoLastOperation()
+            }
+            return true
         }
 
         func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
@@ -302,5 +327,46 @@ struct ResultsTable: NSViewRepresentable {
         }
 
         static let df: DateFormatter = { let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short; return f }()
+    }
+}
+
+// Keyboard actions are scoped to the results view as first responder. Field
+// editors and search fields keep Space, Return and standard text commands.
+enum ResultsKeyAction: Equatable {
+    case preview, open, copy, paste, undo
+
+    static func action(for event: NSEvent, isResultsFirstResponder: Bool) -> Self? {
+        guard isResultsFirstResponder, event.type == .keyDown else { return nil }
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if modifiers.isEmpty {
+            if event.keyCode == 49 { return .preview }
+            if event.keyCode == 36 || event.keyCode == 76 { return .open }
+        }
+        if modifiers == .command {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "c": return .copy
+            case "v": return .paste
+            case "z": return .undo
+            default: break
+            }
+        }
+        return nil
+    }
+}
+
+@MainActor final class ResultsKeyTableView: NSTableView {
+    var onResultKey: ((ResultsKeyAction) -> Bool)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command),
+           let action = ResultsKeyAction.action(for: event, isResultsFirstResponder: window?.firstResponder === self),
+           onResultKey?(action) == true { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if let action = ResultsKeyAction.action(for: event, isResultsFirstResponder: window?.firstResponder === self),
+           onResultKey?(action) == true { return }
+        super.keyDown(with: event)
     }
 }
