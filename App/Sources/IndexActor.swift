@@ -200,7 +200,9 @@ actor IndexActor {
     @discardableResult
     func rescanAll(scanID id: UUID = UUID()) async -> Bool {
         guard !Task.isCancelled else { return false }
-        if rebuildID == nil { previousReplayCheckpointBlocked = replayCheckpointBlocked }
+        // An overflow can arrive during an older rebuild. Superseding it must
+        // carry that block forward until a replacement snapshot is accepted.
+        previousReplayCheckpointBlocked = previousReplayCheckpointBlocked == true || replayCheckpointBlocked
         rebuildCancellation?.cancel()
         let cancellation = IndexScanCancellation()
         rebuildCancellation = cancellation

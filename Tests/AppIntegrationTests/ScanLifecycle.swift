@@ -130,9 +130,57 @@ private final class ScanFixture: @unchecked Sendable {
         precondition(!model.scanning && model.total == 3, "Late progress restarted the completed status")
         let cached = try IndexCache.load(from: temporary.appendingPathComponent("model.idx")).0
         precondition(cached.liveCount(volID: 1) == 3)
+        try await verifySupersededOverflow(in: temporary, suite: suite)
         try verifyShareReplacement(in: temporary)
         verifyOfflineShareRetention()
         print("PASS: superseded/cancelled scans keep current results and progress; failed share replacement preserves known files")
+    }
+
+    @MainActor private static func verifySupersededOverflow(in temporary: URL, suite: String) async throws {
+        let fixture = ScanFixture()
+        let url = temporary.appendingPathComponent("superseded-overflow.idx")
+        let index = IndexActor(rules: .defaults, preferencesSuiteName: suite, cacheURL: url,
+                               diskScanner: { fixture.scan($0, isCancelled: $1, progress: $2) })
+        let seeded = await index.rescanAll()
+        precondition(seeded)
+        await index.flush()
+        let checkpoint = try IndexCache.load(from: url).1
+        var slowRules = ExcludeRules.defaults
+        slowRules.names = ["slow"]
+        await index.setRules(slowRules)
+        let older = Task { await index.rescanAll() }
+        try await waitUntil { fixture.slowCount == 1 }
+        // The overflow arrives after A began. B must accumulate that state before
+        // resetting its own flag, because cancellation accepts neither snapshot.
+        await index.enqueueChanges([.init(path: "/Volumes/scan-lifecycle-fixture", mustScanSubtree: true,
+                                          eventID: checkpoint + 1)])
+        let newer = Task { await index.rescanAll() }
+        try await waitUntil { fixture.slowCount == 2 }
+        newer.cancel()
+        let olderCompleted = await older.value
+        let newerCompleted = await newer.value
+        precondition(!olderCompleted && !newerCompleted && fixture.cancelledCount == 2)
+        try await Task.sleep(for: .milliseconds(650)) // event batching interval is 500ms
+        await index.flush()
+        let afterCancellation = try IndexCache.load(from: url).1
+        precondition(afterCancellation == checkpoint,
+                     "Overflow during a superseded rebuild advanced an unresolved checkpoint")
+        precondition(index.totalCount == 2)
+
+        var latestRules = ExcludeRules.defaults
+        latestRules.names = ["latest"]
+        await index.setRules(latestRules)
+        let accepted = await index.rescanAll()
+        precondition(accepted)
+        await index.flush()
+        let acceptedCheckpoint = try IndexCache.load(from: url).1
+        await index.enqueueChanges([.init(path: "/Volumes/scan-lifecycle-fixture", mustScanSubtree: false,
+                                          eventID: acceptedCheckpoint + 1)])
+        try await Task.sleep(for: .milliseconds(650))
+        await index.flush()
+        let afterAcceptance = try IndexCache.load(from: url).1
+        precondition(afterAcceptance == acceptedCheckpoint + 1,
+                     "Accepted rebuild did not clear the previous overflow checkpoint block")
     }
 
     private static func verifyShareReplacement(in temporary: URL) throws {
