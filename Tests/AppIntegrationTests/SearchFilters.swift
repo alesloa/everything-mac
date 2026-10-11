@@ -32,7 +32,8 @@ import IndexCore
         model.query = "report"; model.fuzzy = false
         model.setSearchFilter(.files)
         model.toggleSearchFilter(.images)
-        try require(model.searchFilters.types == [.images], "Selecting Images left the broad Files filter active")
+        try require(model.searchFilters.selectedTypes == [.files, .images], "Selecting Images unchecked Files")
+        try await waitUntil { model.totalMatches == 5 }
         let filters = SearchFilters(types: [.images, .video], over: SearchSizeLimit(amount: "500"),
             under: SearchSizeLimit(amount: "2", unit: .gigabytes))
         model.setSearchFilters(filters)
@@ -63,9 +64,25 @@ import IndexCore
         try require(model.filterSummary(for: model.workspaceSnapshot).contains(saved.name), "Active saved-filter name missing from summary")
         model.setSearchFilters(SearchFilters())
 
+        var checkboxes = filters
+        checkboxes.selectAllTypes(true)
+        model.setSearchFilters(checkboxes)
+        try await waitUntil { model.totalMatches == 3 }
+        try require(model.searchFilters.everythingSelected, "Everything did not select the complete group")
+        checkboxes.selectAllTypes(false)
+        model.setSearchFilters(checkboxes)
+        try await waitUntil { model.totalMatches == 0 }
+        try require(model.searchFilters.selectedTypes.isEmpty && model.searchFilters.over == filters.over,
+                    "Everything did not clear only the type group")
+        checkboxes.selectType(.images, selected: true)
+        checkboxes.selectType(.files, selected: true)
+        model.setSearchFilters(checkboxes)
+        try await waitUntil { model.totalMatches == 3 }
+        try require(model.searchFilters.selectedTypes == [.files, .images], "Combined Files and Images did not persist")
+
         // Render real SwiftUI/AppKit controls with fixture values, without operating
         // the owner's application or using its preferences or file paths.
-        model.setSearchFilters(filters)
+        model.setSearchFilters(SearchFilters(types: [.files, .images, .audio], over: filters.over, under: filters.under))
         try await capturePopover(model, to: "/tmp/everything-search-filters-popover.png")
         model.searchFilters = SearchFilters(types: filters.types, over: filters.over, under: SearchSizeLimit(amount: "400"))
         try await capturePopover(model, to: "/tmp/everything-search-filters-invalid.png")

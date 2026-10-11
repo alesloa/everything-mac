@@ -91,13 +91,13 @@ extension AppModel {
 
     func setSearchFilter(_ filter: SearchFilter) {
         var filters = searchFilters
-        filters.types = filter == .all ? [] : [filter]
+        filters = SearchFilters(types: filter == .all ? SearchFilters.allTypes : [filter], over: filters.over, under: filters.under)
         setSearchFilters(filters)
     }
 
     func toggleSearchFilter(_ filter: SearchFilter) {
         var filters = searchFilters
-        filters.selectType(filter, selected: filter == .all || !filters.types.contains(filter))
+        filters.selectType(filter, selected: filter == .all || !filters.selectedTypes.contains(filter))
         setSearchFilters(filters, customFilterID: filter == .all ? nil : workspace.window.selectedTab.state.customFilterID)
     }
 
