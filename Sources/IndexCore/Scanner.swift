@@ -56,8 +56,11 @@ public struct Scanner: Sendable {
         let rootName = Self.normalizedRoot(rootPath)
         guard let directory = Self.openDirectory(rootName) else { throw ScanError() }
         defer { closedir(directory) }
+        var metadata = stat()
+        guard fstat(dirfd(directory), &metadata) == 0, metadata.st_size >= 0 else { throw ScanError() }
         let rootID = store.append(name: rootName, parent: FileStore.noParent,
-                                  size: 0, mtime: 0, isDir: true, volID: volID)
+                                  size: UInt64(metadata.st_size), mtime: Int64(metadata.st_mtimespec.tv_sec),
+                                  isDir: true, volID: volID)
         walk(path: rootName, root: rootName, parent: rootID, into: &store, volID: volID, openedDirectory: directory)
     }
 

@@ -495,3 +495,27 @@ private final class StorageScanBudget: @unchecked Sendable {
     #expect(store.volID(of: local) == 1 && store.isLive(foreign))
     #expect(store.childIDs(of: root).count == 2)
 }
+
+@Test func storageReviewScannedAndGraftedRootsKeepFilesystemMetadata() throws {
+    let directory = try safetyDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data([1]).write(to: directory.appendingPathComponent("entry.txt"))
+    let descriptor = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    #expect(descriptor >= 0)
+    defer { if descriptor >= 0 { close(descriptor) } }
+    var actual = stat()
+    #expect(fstat(descriptor, &actual) == 0 && actual.st_size >= 0)
+    var serial = FileStore()
+    try Scanner(rules: .defaults).scan(rootPath: directory.path, into: &serial, volID: 2)
+    let parallel = ParallelScanner.scan(root: directory.path, rules: .defaults, volID: 2, workers: 2)
+    for scanned in [serial, parallel] {
+        #expect(scanned.size(of: scanned.rootID) == UInt64(actual.st_size))
+        #expect(scanned.mtime(of: scanned.rootID) == Int64(actual.st_mtimespec.tv_sec))
+    }
+    var writer = FileStore()
+    let root = writer.append(name: "/", parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
+    let merged = writer.merge(serial, asChildOf: root, volID: 2)
+    let graft = try #require(merged)
+    #expect(writer.size(of: graft) == UInt64(actual.st_size))
+    #expect(writer.mtime(of: graft) == Int64(actual.st_mtimespec.tv_sec))
+}
