@@ -21,6 +21,8 @@ struct NetworkShareStatus: Sendable, Equatable, Identifiable {
 actor IndexActor {
     typealias DiskScanner = @Sendable (ExcludeRules, @escaping @Sendable () -> Bool,
                                       @escaping @Sendable (Int) -> Void) -> FileStore
+    typealias StreamingDiskScanner = @Sendable (ExcludeRules, @escaping @Sendable () -> Bool,
+        @escaping @Sendable (Int) -> Void, @escaping @Sendable (FileStore) -> Void) -> FileStore
     typealias ShareScanner = @Sendable (String, ExcludeRules, UInt32,
                                        @escaping @Sendable () -> Bool,
                                        @escaping @Sendable (Int) -> Void) -> FileStore
@@ -69,13 +71,16 @@ actor IndexActor {
     private var preparedCache: (FileStore, UInt64, UInt64)?
     private let preferences: UserDefaults
     private let configuredCacheURL: URL?
-    private let diskScanner: DiskScanner
+    private let diskScanner: StreamingDiskScanner
+    private var progressiveScanCount = 0
+    private var scanProgressCount = 0
     private let shareScanner: ShareScanner
     private let networkMounts: @Sendable () -> [MountTable.Mount]
     private let refreshClock: @Sendable () -> Date
 
     init(rules configuredRules: ExcludeRules? = nil, preferencesSuiteName: String? = nil,
          cacheURL: URL? = nil, diskScanner: DiskScanner? = nil,
+         streamingDiskScanner: StreamingDiskScanner? = nil,
          shareScanner: ShareScanner? = nil,
          networkMounts: @escaping @Sendable () -> [MountTable.Mount] = { MountTable.networkMounts() },
          refreshClock: @escaping @Sendable () -> Date = { Date() },
@@ -86,8 +91,14 @@ actor IndexActor {
         let preferences = preferencesSuiteName.flatMap(UserDefaults.init(suiteName:)) ?? .standard
         self.preferences = preferences
         configuredCacheURL = cacheURL
-        self.diskScanner = diskScanner ?? { rules, isCancelled, progress in
-            ParallelScanner.scanWholeDisk(rules: rules, isCancelled: isCancelled, progress: progress)
+        if let streamingDiskScanner { self.diskScanner = streamingDiskScanner }
+        else if let diskScanner {
+            self.diskScanner = { rules, cancelled, progress, _ in diskScanner(rules, cancelled, progress) }
+        } else {
+            self.diskScanner = { rules, cancelled, progress, snapshot in
+                ParallelScanner.scanWholeDisk(rules: rules, isCancelled: cancelled,
+                                              progress: progress, onSnapshot: snapshot)
+            }
         }
         self.shareScanner = shareScanner ?? { path, rules, volID, isCancelled, progress in
             ParallelScanner.scan(root: path, rules: rules, volID: volID, workers: 4,
@@ -185,6 +196,7 @@ actor IndexActor {
                 activityJournal.finishScan(id: id, outcome: .scanCancelled, detail: "Index rules changed.")
             }
             rebuildCancellation?.cancel()
+            if progressiveScanCount > 0 { restoreAcceptedPublication() }
             invalidateShareScans()
             preparedCache = nil
         }
@@ -260,9 +272,12 @@ actor IndexActor {
             activityJournal.finishScan(id: previousID, outcome: .scanCancelled, detail: "Replaced by a newer scan.")
         }
         rebuildCancellation?.cancel()
+        if progressiveScanCount > 0 { restoreAcceptedPublication() }
         let cancellation = IndexScanCancellation()
         rebuildCancellation = cancellation
         rebuildID = id
+        progressiveScanCount = 0
+        scanProgressCount = 0
         activityJournal.startScan(id: id, path: "/")
         replayCheckpointBlocked = false
         invalidateShareScans()
@@ -274,9 +289,11 @@ actor IndexActor {
         let previous = store.storageSnapshot()
         let retainedShares = storeFingerprint == fingerprint ? rules.networkShares : []
         let worker = Task.detached(priority: .userInitiated) {
-            var scanned = scanner(effective, { cancellation.isCancelled }) { count in
+            var scanned = scanner(effective, { cancellation.isCancelled }, { count in
                 Task { await self.scanProgress(count, scanID: id) }
-            }
+            }, { snapshot in
+                Task { await self.publishScanSnapshot(snapshot, scanID: id) }
+            })
             if !cancellation.isCancelled, scanned.count > 0 {
                 ShareIndexMutation.retainKnownShares(retainedShares, from: previous, in: &scanned,
                                                      isCancelled: { cancellation.isCancelled })
@@ -298,6 +315,7 @@ actor IndexActor {
         // Partial local scans are deliberate without Full Disk Access. A cancelled
         // walk or an unreadable root must not replace the last searchable snapshot.
         guard !cancellation.isCancelled, !Task.isCancelled, newStore.count > 0 else {
+            if progressiveScanCount > 0 { restoreAcceptedPublication() }
             activityJournal.finishScan(id: id,
                 outcome: cancellation.isCancelled || Task.isCancelled ? .scanCancelled : .scanFailed,
                 detail: cancellation.isCancelled || Task.isCancelled ? nil : "Scanner returned no entries.")
@@ -324,9 +342,31 @@ actor IndexActor {
     }
 
     private func scanProgress(_ count: Int, scanID: UUID) {
-        guard rebuildID == scanID, rebuildCancellation?.isCancelled == false else { return }
+        guard rebuildID == scanID, rebuildCancellation?.isCancelled == false, count >= scanProgressCount else { return }
+        scanProgressCount = count
         activityJournal.scanProgress(id: scanID, count: count)
         onProgress?(count, scanID)
+    }
+
+    private func publishScanSnapshot(_ snapshot: FileStore, scanID: UUID) {
+        // A replacement scan retains the complete known index until acceptance.
+        // A cold scan has no known files, so coherent discovered batches are useful.
+        guard store.count == 0, rebuildID == scanID, rebuildCancellation?.isCancelled == false,
+              snapshot.count > progressiveScanCount else { return }
+        progressiveScanCount = snapshot.count
+        searchIndex.publish(snapshot)
+        let roots = snapshot.rootID == FileStore.noParent ? [] : [snapshot.path(of: snapshot.rootID)]
+        activityJournal.publishIndex(count: snapshot.count, roots: roots)
+        scanProgress(snapshot.count, scanID: scanID)
+        onLiveChange?()
+    }
+
+    private func restoreAcceptedPublication() {
+        searchIndex.publish(store)
+        let roots = store.rootID == FileStore.noParent ? [] : [store.path(of: store.rootID)]
+        activityJournal.publishIndex(count: searchIndex.count, roots: roots)
+        progressiveScanCount = 0
+        onLiveChange?()
     }
 
     // Launch path: load the cache if present (FSEvents replays any changes made

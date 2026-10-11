@@ -9,7 +9,8 @@ extension AppModel {
         state.fuzzy = fuzzy; state.regex = regex; state.diacriticInsensitive = diacriticInsensitive
         state.matchPrefix = matchPrefix; state.matchSuffix = matchSuffix
         state.ignorePunctuation = ignorePunctuation; state.ignoreWhitespace = ignoreWhitespace
-        state.searchFilter = searchFilter; state.customFilterID = workspace.window.selectedTab.state.customFilterID
+        state.searchFilter = searchFilter; state.filters = searchFilters
+        state.customFilterID = workspace.window.selectedTab.state.customFilterID
         state.sortKey = Self.sortKeyName(sortKey); state.ascending = ascending; state.resultLimit = resultLimit
         state.previewVisible = previewVisible; state.thumbnailView = thumbnailView
         state.folderScopePath = folderScope?.path
@@ -29,13 +30,17 @@ extension AppModel {
         wholeWord = state.wholeWord; fuzzy = state.fuzzy; regex = state.regex
         diacriticInsensitive = state.diacriticInsensitive; matchPrefix = state.matchPrefix; matchSuffix = state.matchSuffix
         ignorePunctuation = state.ignorePunctuation; ignoreWhitespace = state.ignoreWhitespace
-        searchFilter = state.searchFilter; sortKey = Self.sortKey(from: state.sortKey); ascending = state.ascending
+        searchFilters = state.effectiveFilters; sortKey = Self.sortKey(from: state.sortKey); ascending = state.ascending
         resultLimit = state.resultLimit; previewVisible = state.previewVisible; thumbnailView = state.thumbnailView
         folderScope = state.folderScopePath.map { FolderScope(path: $0) }
         folderSidebarVisible = state.folderSidebarVisible ?? false
         indexedFolderTotals = state.indexedFolderTotals ?? false
         indexedTotalsColumnOverride = state.indexedFolderTotals
         refreshFolderDetailsIfNeeded()
+        resultList = nil
+        rowSelection = nil; selectionGeneration &+= 1
+        visibleResults = []
+        resultOrdering = false
         selectedRecords = []; selectedID = nil; results = []
         totalMatches = nil; resultSnapshotID = nil; searchError = nil
         workspace.stage(state)
@@ -49,8 +54,12 @@ extension AppModel {
     }
 
     func closeSearchTab(_ id: UUID? = nil) {
+        guard workspace.window.tabs.count > 1 else { return }
         workspace.stage(workspaceSnapshot)
-        applyWorkspace(workspace.closeTab(id ?? workspace.window.selectedTabID))
+        let target = id ?? workspace.window.selectedTabID
+        let selected = target == workspace.window.selectedTabID
+        let state = workspace.closeTab(target)
+        if selected { applyWorkspace(state) }
     }
 
     func selectSearchTab(_ id: UUID) {
@@ -80,8 +89,45 @@ extension AppModel {
         applyWorkspace(state)
     }
 
+    func setSearchFilter(_ filter: SearchFilter) {
+        var filters = searchFilters
+        filters.types = filter == .all ? [] : [filter]
+        setSearchFilters(filters)
+    }
+
+    func toggleSearchFilter(_ filter: SearchFilter) {
+        var filters = searchFilters
+        filters.selectType(filter, selected: filter == .all || !filters.types.contains(filter))
+        setSearchFilters(filters, customFilterID: filter == .all ? nil : workspace.window.selectedTab.state.customFilterID)
+    }
+
+    func setSearchFilters(_ filters: SearchFilters, customFilterID: UUID? = nil, options: SearchWorkspaceState? = nil) {
+        guard filters.validationError == nil else { return }
+        var state = workspaceSnapshot
+        state.filters = filters
+        state.searchFilter = filters.types.count == 1 ? filters.types.first ?? .all : .all
+        state.customFilterID = customFilterID
+        if let options {
+            state.matchPath = options.matchPath; state.caseSensitive = options.caseSensitive
+            state.wholeWord = options.wholeWord; state.fuzzy = options.fuzzy
+        }
+        applyWorkspace(state)
+        savePrefs()
+    }
+
     func resolvedWorkspaceQuery() throws -> Query {
         try SearchMacroExpansion(savedSearches: workspace.library.archive.savedSearches).resolve(workspaceSnapshot)
+    }
+
+    // Source: categories and bounds are saved workspace choices; custom labels
+    // are actual saved-search names or the macro resolver's missing-filter error.
+    func filterSummary(for state: SearchWorkspaceState) -> String {
+        var pieces: [String] = state.effectiveFilters.isEmpty ? [] : [state.effectiveFilters.summary]
+        if let id = state.customFilterID {
+            pieces.append(workspace.library.archive.savedSearches.first { $0.id == id && $0.isCustomFilter }?.name
+                ?? SearchMacroError.missingFilter.localizedDescription)
+        }
+        return pieces.isEmpty ? SearchFilter.all.title : pieces.joined(separator: ", ")
     }
 
     var workspaceExpansionError: String? {

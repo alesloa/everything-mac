@@ -96,7 +96,8 @@ private struct SavedSearchEditor: View {
                         if library.storageError == nil { dismiss() }
                         else { error = library.storageError }
                     } catch { self.error = error.localizedDescription }
-                }.keyboardShortcut(.defaultAction).disabled(saved.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }.keyboardShortcut(.defaultAction).disabled(saved.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || saved.state.effectiveFilters.validationError != nil)
             }
         }.padding(20).frame(width: 640, height: 660)
     }
@@ -105,8 +106,11 @@ private struct SavedSearchEditor: View {
 private struct WorkspaceStateOptions: View {
     @Binding var state: SearchWorkspaceState
     var body: some View {
-        Picker("Built-in filter", selection: $state.searchFilter) {
-            ForEach(SearchFilter.allCases, id: \.self) { Text($0.title).tag($0) }
+        DisclosureGroup("Filters") {
+            SearchFiltersEditor(filters: Binding(get: { state.effectiveFilters }, set: {
+                state.filters = $0
+                state.searchFilter = $0.types.count == 1 ? $0.types.first ?? .all : .all
+            }))
         }
         DisclosureGroup("Match options") {
             Toggle("Match path", isOn: $state.matchPath)
@@ -127,7 +131,6 @@ private struct WorkspaceStateOptions: View {
                 Text("Size").tag("size"); Text("Date modified").tag("mtime"); Text("Kind").tag("kind")
             }
             Toggle("Ascending order", isOn: $state.ascending)
-            Stepper("Maximum results: \(state.resultLimit)", value: $state.resultLimit, in: 100...100_000, step: 100)
             Toggle("Show preview", isOn: $state.previewVisible)
             Toggle("Show thumbnails", isOn: $state.thumbnailView)
             // Source: the saved view/scope values defined by SearchWorkspaceState.

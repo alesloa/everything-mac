@@ -13,6 +13,7 @@ struct NativeResultsExportView: View {
     var sort: QueryEngine.SortKey = .relevance
     var ascending = true
     var folderPath: String? = nil
+    var selection: SearchRowSelection? = nil
     @State private var format: CatalogFormat = .csv
     @State private var scope: CatalogExportScope = .allMatching
     @State private var isWorking = false
@@ -27,10 +28,10 @@ struct NativeResultsExportView: View {
             Picker("Rows", selection: $scope) { ForEach(CatalogExportScope.allCases) { Text($0.label).tag($0) } }
             Picker("Format", selection: $format) { ForEach(CatalogFormat.allCases) { Text($0.label).tag($0) } }
             // These numbers come from the captured selection and shown arrays.
-            Text("\(selected.count.formatted()) selected · \(shown.count.formatted()) shown").font(.caption).foregroundStyle(.secondary)
+            Text("\((selection?.count ?? selected.count).formatted()) selected · \(shown.count.formatted()) shown").font(.caption).foregroundStyle(.secondary)
             Text(query.text).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
             // This behavior description comes from CatalogIO.exportNative.
-            Text("All matching rows exports the complete query in the current sort order, beyond the display limit.")
+            Text("All matching rows exports the complete query in the current sort order. Shown rows exports the visible rows.")
                 .font(.caption).foregroundStyle(.secondary)
             if let errorMessage { Text(errorMessage).foregroundStyle(.red).textSelection(.enabled) }
             HStack {
@@ -39,7 +40,7 @@ struct NativeResultsExportView: View {
                 Button(isWorking ? "Cancel operation" : "Cancel") {
                     if isWorking { cancellation?.cancel(); operation?.cancel() } else { dismiss() }
                 }
-                Button("Save…", action: save).disabled(isWorking || (scope == .selected && selected.isEmpty))
+                Button("Save…", action: save).disabled(isWorking || (scope == .selected && (selection?.count ?? selected.count) == 0))
                     .keyboardShortcut(.defaultAction)
             }
         }.padding(20).frame(width: 470)
@@ -47,6 +48,7 @@ struct NativeResultsExportView: View {
     }
 
     private func save() {
+        let selection = selection?.pinned()
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: format.rawValue)].compactMap { $0 }
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -55,7 +57,16 @@ struct NativeResultsExportView: View {
         self.cancellation = cancellation; isWorking = true; errorMessage = nil
         operation = Task {
             do {
+                if scope == .selected, let selection {
+                    let ready = await withTaskCancellationHandler { await selection.list.prepare() }
+                        onCancel: { selection.list.cancel() }
+                    if !ready { throw CancellationError() }
+                }
                 _ = try await Task.detached(priority: .utility) {
+                    if scope == .selected, let selection {
+                        return try CatalogIO.exportSelection(selection, to: url, format: format,
+                                                             isCancelled: { cancellation.isCancelled })
+                    }
                     if scope == .allMatching {
                         return try CatalogIO.exportNative(store: index.readSnapshot(), query: query, sort: sort, ascending: ascending,
                             folderPath: folderPath, to: url, format: format, isCancelled: { cancellation.isCancelled })

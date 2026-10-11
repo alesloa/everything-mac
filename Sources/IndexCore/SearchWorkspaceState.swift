@@ -14,6 +14,8 @@ public struct SearchWorkspaceState: Codable, Equatable, Sendable {
     public var ignorePunctuation = false
     public var ignoreWhitespace = false
     public var searchFilter: SearchFilter = .all
+    // Optional so older saved tabs, history and bookmarks retain their single filter.
+    public var filters: SearchFilters?
     public var customFilterID: UUID?
     public var sortKey = "relevance"
     public var ascending = true
@@ -28,8 +30,12 @@ public struct SearchWorkspaceState: Codable, Equatable, Sendable {
 
     public init(query: String = "") { self.query = query }
 
+    public var effectiveFilters: SearchFilters {
+        filters ?? SearchFilters(types: searchFilter == .all ? [] : [searchFilter])
+    }
+
     public var searchQuery: Query {
-        searchFilter.applying(to: Query(text: query, matchPath: matchPath,
+        effectiveFilters.applying(to: Query(text: query, matchPath: matchPath,
             caseInsensitive: !caseSensitive, wholeWord: wholeWord, fuzzy: fuzzy,
             regex: regex, diacriticInsensitive: diacriticInsensitive,
             matchPrefix: matchPrefix, matchSuffix: matchSuffix,
@@ -38,7 +44,7 @@ public struct SearchWorkspaceState: Codable, Equatable, Sendable {
 
     public var hasSearch: Bool {
         !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || searchFilter != .all || customFilterID != nil || folderScopePath != nil
+            || !effectiveFilters.isEmpty || customFilterID != nil || folderScopePath != nil
     }
 
     public mutating func normalize() {

@@ -7,6 +7,7 @@ All notable changes to EverythingMac are recorded here. The format is based on
 ## [0.5.0] - Unreleased
 
 ### Added
+- A Filters button with multiple file types and strict Over/Under size limits in B, KB, MB, GB, or TB, retained in tabs and saved searches.
 - Advanced query operators, regular expressions, metadata predicates, built-in file-type filters, and a visual query builder.
 - Scheduled network-share refresh with per-share pause, cancel, manual refresh, and observed progress.
 - Multi-file actions, file clipboard and drag-and-drop, copy/move destinations, single and batch rename, Finder Get Info, and guarded undo.
@@ -21,6 +22,10 @@ All notable changes to EverythingMac are recorded here. The format is based on
 - An index activity viewer with bounded observed events and actual scan, cache, and network status.
 
 ### Fixed
+- Simplified the search bar to one Filters popover, with matching options and tabs shown only when multiple tabs are open.
+- Native results scroll through every match with bounded row decoding; the status bar reports the full count without a shown-row ceiling.
+- Jumping to the bottom prepares its rows independently; live updates keep the visible list until its replacement is ready.
+- Cold scans publish coherent discovered-file batches before completion while searches remain independent of the filesystem writer.
 - Undo retains edited copies even when an in-place edit preserves the original byte count and restores the exact modification time.
 - Saved catalogs restore independently, so a corrupt catalog or mapping does not hide valid catalogs.
 - Quick Look requests stay attached to their originating search window and are canceled when that window closes.

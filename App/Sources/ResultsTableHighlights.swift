@@ -15,8 +15,15 @@ extension ResultsTable.Coordinator {
         highlightPrepared = true
         highlightTask?.cancel()
         highlights = [:]
+        let indexes = visibleRowIndexes()
+        let rows = indexes.isEmpty ? Array(parent.rows.prefix(256)) : indexes.compactMap { record(at: $0) }
+        let list = parent.resultList
+        Task { [weak self] in
+            guard let self, self.parent.resultList === list else { return }
+            self.parent.onVisibleRows?(rows)
+        }
         guard let query = parent.query, !query.text.isEmpty else { return }
-        let rows = parent.rows, request = UUID()
+        let request = UUID()
         highlightRequest = request
         highlightTask = Task { [weak self] in
             let worker = Task.detached(priority: .userInitiated) {
@@ -33,7 +40,8 @@ extension ResultsTable.Coordinator {
             self.highlights = result
             // Repaint without reloading rows or changing the selected identities.
             if let table = self.table {
-                table.reloadData(forRowIndexes: IndexSet(integersIn: 0..<self.parent.rows.count),
+                let repaint = indexes.isEmpty ? IndexSet(integersIn: 0..<min(256, self.rowCount)) : indexes
+                table.reloadData(forRowIndexes: repaint,
                                  columnIndexes: IndexSet(integersIn: 0..<table.tableColumns.count))
             }
         }

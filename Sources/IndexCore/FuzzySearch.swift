@@ -218,12 +218,16 @@ extension QueryEngine {
     public func rankedPrefix(_ matches: [SearchMatch], limit: Int, bestFirst: Bool = true,
                              in store: FileStore,
                              isCancelled: @Sendable () -> Bool = { false }) -> [UInt32] {
-        guard limit > 0 else { return [] }
+        guard limit > 0, !isCancelled() else { return [] }
         func earlier(_ a: SearchMatch, _ b: SearchMatch) -> Bool {
             if a.score != b.score { return bestFirst ? a.score > b.score : a.score < b.score }
             if store.nameSortsBefore(a.id, b.id) { return true }
             if store.nameSortsBefore(b.id, a.id) { return false }
             return a.id < b.id
+        }
+        if matches.count <= limit {
+            let sorted = cancellableSorted(matches, isCancelled: isCancelled, by: earlier)
+            return isCancelled() ? [] : sorted.map(\.id)
         }
         var heap: [SearchMatch] = []
         heap.reserveCapacity(min(limit, matches.count))

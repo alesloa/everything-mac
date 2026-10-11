@@ -2,20 +2,21 @@ import SwiftUI
 
 struct StatusBar: View {
     var total: Int
-    var shown: Int
     var scanning: Bool
     var shares: [NetworkShareStatus] = []
     var matches: Int? = nil
+    var ordering = false
+    var selected = 0
     var body: some View {
         HStack(spacing: 6) {
+            // Source: the exact accepted query count, or published index count before a query finishes.
+            Text("\((matches ?? total).formatted()) objects")
             if scanning {
                 ProgressView()
                     .controlSize(.small)
                     .scaleEffect(0.6)
                     .frame(width: 12, height: 12)
-                Text("Indexing… \(total.formatted()) files")
-            } else {
-                Text("\(total.formatted()) objects")
+                Text("Indexing…")
             }
             ForEach(shares.filter { $0.scanning || $0.isOffline }) { s in
                 Text("·")
@@ -27,9 +28,13 @@ struct StatusBar: View {
                 }
             }
             Spacer()
-            // Source: shown rows and the total count from the same accepted SearchReport.
-            if let matches { Text("\(shown.formatted()) shown · \(matches.formatted()) matches") }
-            else { Text("\(shown.formatted()) results") }
+            // Source: the complete native selection's row-range count.
+            if selected > 0 { Text("\(selected.formatted()) selected") }
+            if ordering {
+                // Source: the active result list's background ordering task.
+                ProgressView().controlSize(.small)
+                Text("Sorting…")
+            }
         }
         .font(.system(size: 11)).foregroundStyle(.secondary)
         .padding(.horizontal, 10).padding(.vertical, 4)

@@ -26,7 +26,7 @@ So I wrote my own. It reads every filename on the machine into memory and search
 - Results table with sortable Name, Path, Size, Kind, and Date Modified, persisted column layouts, exact match counts, and highlighted matches. Optional Indexed Size and Files columns summarize indexed descendants.
 - Shows the real file-type icon and a readable kind for each row.
 - Multi-file Open, Open With, Reveal in Finder, clipboard, copy/move, rename and batch rename, Finder Get Info, and Move to Trash. Undo checks that its original targets have not changed.
-- Advanced queries, file-type filters, saved searches, reusable macros, history, and independent search tabs and windows restored across launches.
+- Advanced queries, multiple file-type filters with Over/Under size limits, saved searches, reusable macros, history, and independent search tabs and windows restored across launches.
 - Quick Look with Space, an optional preview pane, and a thumbnail grid that loads visible results.
 - A menu bar item and configurable global shortcut in Settings. Indexing continues with the search windows closed.
 - An optional indexed folder sidebar and recursive totals, computed from the published index rather than filesystem reads for each row.
@@ -146,11 +146,13 @@ regex:"report[0-9]+"
 
 Quoted words use literal matching. Boolean groups, metadata predicates, and search options share the same behavior in native search, catalogs, and the command-line tool where metadata is available. Invalid queries display their actual validation error. Save the current search from **Bookmarks**, and use **History** to revisit searches. Each tab and window retains its own query, options, folder scope, and sort order.
 
+Open **Filters** beside the search field to select multiple file types and optional **Over** and **Under** size limits, then click **Apply**. Selected types form a union; size limits narrow that union to files strictly above or below the entered sizes. Choose MB or GB for decimal units, and use **Clear All**, then **Apply**, to remove filters while keeping the search text. Filters are retained in saved searches and tabs.
+
 ### Previews, totals, and file tools
 
 Select files and press Space for Quick Look. **View > Preview**, **Thumbnails**, **Folder Sidebar**, and **Indexed Folder Totals** enable the corresponding views. Folder totals describe indexed descendants, so exclusions and unavailable metadata affect them. Preview and thumbnail reads skip network files by default; the network-read option is explicit.
 
-**File > Export Results** exports selected rows, shown rows, or every match from the current immutable snapshot, including matches beyond the display limit. **Tools > File Catalogs** imports portable lists and keeps unavailable catalog metadata absent. Windows catalog paths require an explicit mapping before native file actions. See [FILE_CATALOGS.md](FILE_CATALOGS.md).
+**File > Export Results** exports selected rows, visible rows, or every match from the current immutable snapshot. The native result table scrolls through the full match count and decodes rows on demand. **Tools > File Catalogs** imports portable lists and keeps unavailable catalog metadata absent. Windows catalog paths require an explicit mapping before native file actions. See [FILE_CATALOGS.md](FILE_CATALOGS.md).
 
 **Tools > Find Duplicates** verifies file contents and compares folder trees. It does not delete files automatically. **Tools > Search File Contents** searches supported text and PDF files on demand, with bounded workers, cancellation, and file-size limits. Network content reads require opt-in; cloud and dataless files are skipped. **Tools > Index Activity** shows observed indexing events and status without blocking filename searches.
 

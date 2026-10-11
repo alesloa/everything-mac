@@ -258,7 +258,7 @@ public extension QueryEngine {
         ids.sorted(by: sortLess(key, ascending: ascending, in: store))
     }
 
-    private func sortLess(_ key: SortKey, ascending: Bool, in store: FileStore) -> (UInt32, UInt32) -> Bool {
+    func sortLess(_ key: SortKey, ascending: Bool, in store: FileStore) -> (UInt32, UInt32) -> Bool {
         let primary = ascendingLess(key, in: store)
         return { a, b in
             if primary(a, b) { return ascending }
@@ -281,7 +281,7 @@ public extension QueryEngine {
         let earlier = sortLess(key, ascending: ascending, in: store)
 
         if ids.count <= limit {
-            let result = ids.sorted(by: earlier)
+            let result = cancellableSorted(ids, isCancelled: isCancelled, by: earlier)
             return isCancelled() ? [] : result
         }
 

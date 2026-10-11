@@ -15,7 +15,7 @@ private struct WorkspaceMenuCommands: Commands {
             Button("New Search Tab") { model.newSearchTab() }
                 .keyboardShortcut("t", modifiers: .command).disabled(!workspace.canAddTab)
             Button("Close Search Tab") { model.closeSearchTab() }
-                .keyboardShortcut("w", modifiers: [.command, .shift])
+                .keyboardShortcut("w", modifiers: [.command, .shift]).disabled(workspace.window.tabs.count < 2)
             Button("Next Search Tab") { model.selectAdjacentSearchTab(1) }
                 .keyboardShortcut("]", modifiers: [.command, .shift])
             Button("Previous Search Tab") { model.selectAdjacentSearchTab(-1) }
