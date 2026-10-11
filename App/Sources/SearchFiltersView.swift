@@ -11,16 +11,17 @@ struct SearchFiltersEditor: View {
             HStack {
                 Text("File types").font(.headline)
                 Spacer()
-                Button("Everything") { filters.types = [] }.disabled(filters.types.isEmpty)
+                Toggle("Everything", isOn: Binding(get: { filters.everythingSelected },
+                    set: { filters.selectAllTypes($0) })).toggleStyle(.checkbox)
             }
             LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 8) {
                 ForEach(SearchFilter.allCases.filter { $0 != .all }, id: \.self) { filter in
-                    Toggle(filter.title, isOn: Binding(get: { filters.types.contains(filter) }, set: {
+                    Toggle(filter.title, isOn: Binding(get: { filters.selectedTypes.contains(filter) }, set: {
                         filters.selectType(filter, selected: $0)
                     })).toggleStyle(.checkbox)
                 }
             }
-            Text("Match any selected type. None selected searches everything.")
+            Text("Match any selected type. Files includes all file types.")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             Text("File size").font(.headline)

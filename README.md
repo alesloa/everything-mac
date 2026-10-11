@@ -146,7 +146,7 @@ regex:"report[0-9]+"
 
 Quoted words use literal matching. Boolean groups, metadata predicates, and search options share the same behavior in native search, catalogs, and the command-line tool where metadata is available. Invalid queries display their actual validation error. Save the current search from **Bookmarks**, and use **History** to revisit searches. Each tab and window retains its own query, options, folder scope, and sort order.
 
-Open **Filters** beside the search field to select multiple file types and optional **Over** and **Under** size limits, then click **Apply**. Selected types form a union; size limits narrow that union to files strictly above or below the entered sizes. Choose MB or GB for decimal units, and use **Clear All**, then **Apply**, to remove filters while keeping the search text. Filters are retained in saved searches and tabs.
+Open **Filters** beside the search field to select multiple file types and optional **Over** and **Under** size limits, then click **Apply**. **Everything** checks or clears the type group; each type stays independently selectable, and Files includes every file type. Selected types form a union; size limits narrow that union to files strictly above or below the entered sizes. Choose MB or GB for decimal units, and use **Clear All**, then **Apply**, to remove filters while keeping the search text. Filters are retained in saved searches and tabs.
 
 ### Previews, totals, and file tools
 

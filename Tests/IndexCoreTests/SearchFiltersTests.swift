@@ -3,19 +3,40 @@ import Testing
 @testable import IndexCore
 
 @Suite struct SearchFiltersTests {
-    @Test func specificTypesReplaceBroadFilesAndKeepFoldersIndependent() {
+    @Test func allTypeCheckboxesRemainIndependent() {
         var filters = SearchFilters(types: [.files])
         filters.selectType(.images, selected: true)
-        #expect(filters.types == [.images])
+        #expect(filters.selectedTypes == [.files, .images])
         filters.selectType(.video, selected: true)
         filters.selectType(.folders, selected: true)
-        #expect(filters.types == [.images, .video, .folders])
+        #expect(filters.selectedTypes == [.files, .images, .video, .folders])
         filters.selectType(.files, selected: true)
-        #expect(filters.types == [.files, .folders])
+        #expect(filters.selectedTypes == [.files, .images, .video, .folders])
         filters.selectType(.files, selected: false)
-        #expect(filters.types == [.folders])
+        #expect(filters.selectedTypes == [.images, .video, .folders])
         filters.selectType(.all, selected: true)
         #expect(filters.isEmpty)
+        #expect(filters.everythingSelected && filters.selectedTypes == SearchFilters.allTypes)
+    }
+
+    @Test func everythingSelectsAndClearsAllWithoutLosingSizesOrLegacyDefaults() throws {
+        var filters = SearchFilters(types: [.images, .audio], over: SearchSizeLimit(amount: "500"))
+        filters.selectAllTypes(true)
+        #expect(filters.everythingSelected && filters.selectedTypes == SearchFilters.allTypes)
+        #expect(names(filters) == ["report-large.jpg", "report-video.mp4", "report-upper.zip", "other.jpg"])
+        filters.selectAllTypes(false)
+        #expect(filters.selectedTypes.isEmpty && !filters.everythingSelected && !filters.isEmpty)
+        #expect(names(filters).isEmpty)
+        #expect(filters.over?.amount == "500")
+        let roundTrip = try JSONDecoder().decode(SearchFilters.self, from: JSONEncoder().encode(filters))
+        #expect(roundTrip == filters && names(roundTrip).isEmpty)
+        let legacy = try JSONDecoder().decode(SearchFilters.self, from: Data("{\"types\":[]}".utf8))
+        #expect(legacy.isEmpty && legacy.everythingSelected)
+        #expect(names(legacy).count == fixture().count)
+        filters.selectType(.images, selected: true)
+        filters.selectType(.files, selected: true)
+        #expect(filters.selectedTypes == [.images, .files])
+        #expect(names(filters) == ["report-large.jpg", "report-video.mp4", "report-upper.zip", "other.jpg"])
     }
     private func fixture() -> FileStore {
         var store = FileStore()

@@ -65,8 +65,9 @@ final class AppModel: ObservableObject {
     @Published var searchFilters = SearchFilters()
     // Compatibility for older single-filter preferences and advanced-search forms.
     var searchFilter: SearchFilter {
-        get { searchFilters.types.count == 1 ? searchFilters.types.first ?? .all : .all }
-        set { searchFilters.types = newValue == .all ? [] : [newValue] }
+        get { searchFilters.selectedTypes.count == 1 ? searchFilters.selectedTypes.first ?? .all : .all }
+        set { searchFilters = SearchFilters(types: newValue == .all ? SearchFilters.allTypes : [newValue],
+            over: searchFilters.over, under: searchFilters.under) }
     }
     @Published var searchError: String?
     @Published var activePanel: AppFeaturePanel?

@@ -11,9 +11,12 @@ struct SearchFeatureCommands: Commands {
             Button("Advanced Search…") { model.activePanel = .advancedSearch }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
             Menu("Filters") {
-                Button("Everything") { model.setSearchFilters(SearchFilters()) }
+                Toggle("Everything", isOn: Binding(get: { model.searchFilters.everythingSelected }, set: {
+                    var filters = model.searchFilters; filters.selectAllTypes($0)
+                    model.setSearchFilters(filters, customFilterID: model.workspaceSnapshot.customFilterID)
+                }))
                 ForEach(SearchFilter.allCases.filter { $0 != .all }, id: \.self) { filter in
-                    Toggle(filter.title, isOn: Binding(get: { model.searchFilters.types.contains(filter) },
+                    Toggle(filter.title, isOn: Binding(get: { model.searchFilters.selectedTypes.contains(filter) },
                         set: { _ in model.toggleSearchFilter(filter) }))
                 }
             }

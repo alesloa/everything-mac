@@ -22,6 +22,7 @@ All notable changes to EverythingMac are recorded here. The format is based on
 - An index activity viewer with bounded observed events and actual scan, cache, and network status.
 
 ### Fixed
+- Everything is a select-all checkbox, and Files can remain checked alongside specific file categories.
 - Simplified the search bar to one Filters popover, with matching options and tabs shown only when multiple tabs are open.
 - Native results scroll through every match with bounded row decoding; the status bar reports the full count without a shown-row ceiling.
 - Jumping to the bottom prepares its rows independently; live updates keep the visible list until its replacement is ready.
