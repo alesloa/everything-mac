@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import IndexCore
+import Darwin
 
 @MainActor private final class MultiClickedTable: NSTableView {
     var simulatedClickedRow = 0
@@ -86,6 +87,30 @@ import IndexCore
         outcome = await engine.undo()
         precondition(!outcome.errors.isEmpty && outcome.changed == 0 && outcome.canUndo)
         try require(try contents(copied) == "edited after copy", "Undo must retain files edited after the operation")
+
+        let preservingEngine = FileOperationEngine { source in
+            let destination = trash.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.moveItem(at: source, to: destination)
+            return destination
+        }
+        let preservingCopy = root.appendingPathComponent("preserved-time-copy.txt")
+        outcome = await preservingEngine.perform(.copy([FileTransfer(source: original, destination: preservingCopy)]))
+        precondition(outcome.errors.isEmpty && outcome.changed == 1)
+        var beforeEdit = stat(), afterEdit = stat()
+        precondition(lstat(preservingCopy.path, &beforeEdit) == 0)
+        let edit = try FileHandle(forWritingTo: preservingCopy)
+        try edit.write(contentsOf: Data("modified".utf8))
+        try edit.close()
+        var timestamps = [beforeEdit.st_atimespec, beforeEdit.st_mtimespec]
+        precondition(utimensat(AT_FDCWD, preservingCopy.path, &timestamps, 0) == 0)
+        precondition(lstat(preservingCopy.path, &afterEdit) == 0)
+        precondition(beforeEdit.st_ino == afterEdit.st_ino && beforeEdit.st_size == afterEdit.st_size)
+        precondition(beforeEdit.st_mtimespec.tv_sec == afterEdit.st_mtimespec.tv_sec &&
+                     beforeEdit.st_mtimespec.tv_nsec == afterEdit.st_mtimespec.tv_nsec)
+        outcome = await preservingEngine.undo()
+        precondition(!outcome.errors.isEmpty && outcome.changed == 0 && outcome.canUndo,
+                     "Undo must reject in-place edits even when exact modification time and byte count are preserved")
+        try require(try contents(preservingCopy) == "modified", "The edited copy must remain at its original destination")
 
         let moveEngine = FileOperationEngine()
         let protectedSource = try file("protected.txt")
