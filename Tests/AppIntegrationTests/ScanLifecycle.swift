@@ -132,6 +132,7 @@ private final class ScanFixture: @unchecked Sendable {
         precondition(cached.liveCount(volID: 1) == 3)
         try await verifySupersededOverflow(in: temporary, suite: suite)
         try verifyShareReplacement(in: temporary)
+        verifyExactSharePathIdentity()
         verifyOfflineShareRetention()
         print("PASS: superseded/cancelled scans keep current results and progress; failed share replacement preserves known files")
     }
@@ -193,18 +194,65 @@ private final class ScanFixture: @unchecked Sendable {
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unreadable.path) }
         var store = FileStore()
         let root = store.append(name: temporary.path, parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
+        // The mount appeared over a directory already present in the local index,
+        // before /Volumes reconciliation removed its obsolete local records.
+        let localRoot = store.append(name: "share", parent: root, size: 0, mtime: 0, isDir: true, volID: 1)
+        let localFile = store.append(name: "old-local.txt", parent: localRoot, size: 1, mtime: 1, isDir: false, volID: 1)
+        let localFolder = store.append(name: "old-folder", parent: localRoot, size: 0, mtime: 0, isDir: true, volID: 1)
+        let localNested = store.append(name: "nested.txt", parent: localFolder, size: 1, mtime: 1, isDir: false, volID: 1)
+        let unrelated = store.append(name: "unrelated.txt", parent: root, size: 1, mtime: 1, isDir: false, volID: 1)
         let oldShare = store.append(name: "share", parent: root, size: 0, mtime: 0, isDir: true, volID: share.volID)
         let known = store.append(name: "known.txt", parent: oldShare, size: 1, mtime: 1, isDir: false, volID: share.volID)
         let partial = ParallelScanner.scan(root: mount.path, rules: .defaults, volID: share.volID, workers: 2)
         precondition(partial.count > 0 && !partial.scanCompleted, "Unreadable descendant fixture must produce a partial scan")
         precondition(!ShareIndexMutation.replace(share, at: mount.path, with: partial, in: &store))
         precondition(store.isLive(known) && store.liveCount(volID: share.volID) == 2)
+        precondition(store.isLive(localRoot) && store.isLive(localFile) && store.isLive(localNested),
+                     "Incomplete share scan removed the last-known local subtree")
         precondition(!ShareIndexMutation.replace(share, at: mount.path, with: FileStore(), in: &store))
-        precondition(store.isLive(known))
+        precondition(store.isLive(known) && store.isLive(localFile))
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unreadable.path)
         let complete = ParallelScanner.scan(root: mount.path, rules: .defaults, volID: share.volID, workers: 2)
         precondition(ShareIndexMutation.replace(share, at: mount.path, with: complete, in: &store))
         precondition(!store.isLive(known) && store.liveCount(volID: share.volID) == complete.count)
+        let roots = store.childIDs(of: root).filter { store.name(of: $0) == "share" }
+        precondition(roots.count == 1 && store.volID(of: roots[0]) == share.volID,
+                     "Complete share scan left duplicate roots at the mount path")
+        precondition(!store.isLive(localRoot) && !store.isLive(localFile) && !store.isLive(localFolder)
+                     && !store.isLive(localNested) && store.isLive(unrelated),
+                     "Complete share scan did not replace only its stale mount-path subtree")
+    }
+
+    private static func verifyExactSharePathIdentity() {
+        let share = NetworkShare(source: "//fixture/unicode", name: "unicode")
+        let composed = "caf\u{e9}", decomposed = "cafe\u{301}"
+        precondition(composed == decomposed && !composed.utf8.elementsEqual(decomposed.utf8))
+        var store = FileStore()
+        let parent = store.append(name: "/fixture", parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
+        let replaced = store.append(name: composed, parent: parent, size: 0, mtime: 0, isDir: true, volID: 1)
+        let other = store.append(name: decomposed, parent: parent, size: 0, mtime: 0, isDir: true, volID: 1)
+        let otherFile = store.append(name: "other.txt", parent: other, size: 1, mtime: 1, isDir: false, volID: 1)
+        let mountPath = "/fixture/" + composed
+        var wrongPath = FileStore()
+        wrongPath.append(name: "/fixture/" + decomposed, parent: FileStore.noParent, size: 0, mtime: 0,
+                         isDir: true, volID: share.volID)
+        precondition(!ShareIndexMutation.replace(share, at: mountPath, with: wrongPath, in: &store),
+                     "Canonically equivalent strings identified a different mount path")
+        var complete = FileStore()
+        complete.append(name: mountPath, parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: share.volID)
+        precondition(ShareIndexMutation.replace(share, at: mountPath, with: complete, in: &store))
+        precondition(!store.isLive(replaced) && store.isLive(other) && store.isLive(otherFile),
+                     "Share replacement removed a distinct UTF-8 path")
+        let roots = store.childIDs(of: parent)
+        precondition(roots.count == 2 && roots.filter {
+            store.name(of: $0).utf8.elementsEqual(composed.utf8)
+        }.count == 1)
+        var fresh = FileStore()
+        let freshParent = fresh.append(name: "/fixture", parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
+        fresh.append(name: decomposed, parent: freshParent, size: 0, mtime: 0, isDir: true, volID: 1)
+        ShareIndexMutation.retainKnownShares([share], from: store, in: &fresh, isCancelled: { false })
+        precondition(fresh.liveCount(volID: share.volID) == 1,
+                     "A distinct canonical-equivalent local path suppressed offline share retention")
     }
 
     private static func verifyOfflineShareRetention() {

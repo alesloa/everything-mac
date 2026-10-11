@@ -391,7 +391,8 @@ actor IndexActor {
         scanningShares[share.source] = nil
         defer { publishShareStatus() }
         guard rules.networkShares.contains(share),
-              MountTable.mountPath(forSource: share.source) == mountPath else {
+              let currentMountPath = MountTable.mountPath(forSource: share.source),
+              currentMountPath.utf8.elementsEqual(mountPath.utf8) else {
             mountedShares.remove(share.source)
             return
         }
