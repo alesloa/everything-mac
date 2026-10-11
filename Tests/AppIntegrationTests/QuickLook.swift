@@ -6,10 +6,21 @@ import UniformTypeIdentifiers
 import IndexCore
 import Darwin
 import QuickLookThumbnailing
+import Combine
 
 @main struct QuickLookTests {
-    @MainActor static func main() async throws {
-        _ = NSApplication.shared
+    @MainActor static func main() {
+        let app = NSApplication.shared
+        Task { @MainActor in
+            do { try await run() }
+            catch { print("FAIL: \(error)"); exit(EXIT_FAILURE) }
+            exit(EXIT_SUCCESS)
+        }
+        // Quick Look panel ordering includes native AppKit animation callbacks.
+        app.run()
+    }
+
+    @MainActor private static func run() async throws {
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("quick-look-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         let physicalPath = realpath(temporary.path, nil)!
@@ -70,6 +81,7 @@ import QuickLookThumbnailing
         precondition(service.activeCount == 0 && service.queuedCount == 0)
         try await scheduledCancellationTests(image)
         try await viewportTests(directory, imageURL)
+        try await windowLifetimeTests(image, unknown)
 
         let controller = QuickLookController.shared
         controller.show([image])
@@ -80,7 +92,7 @@ import QuickLookThumbnailing
         precondition(controller.previewPanel(nil, previewItemAt: -1) == nil)
         precondition(controller.previewPanel(nil, previewItemAt: Int.max) == nil)
         controller.close()
-        print("PASS: native PNG thumbnails, live-file cache keys, bounded cache, viewport-only generation, in-flight/queued cancellation, stale selection, keyboard focus and missing/unsupported files")
+        print("PASS: native PNG thumbnails, live-file cache keys, bounded cache, viewport-only generation, in-flight/queued cancellation, stale selection, keyboard focus, window ownership and missing/unsupported files")
     }
 
     private static func check(_ value: Bool, _ message: String = "Native preview assertion failed") {
@@ -147,6 +159,67 @@ import QuickLookThumbnailing
         precondition(field.stringValue == " ", "The native field editor must receive spaces")
         precondition(previews == 1)
         window.close()
+    }
+
+    @MainActor private static func windowLifetimeTests(_ image: FileRecord, _ unknown: FileRecord) async throws {
+        let a = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
+                         styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let b = NSWindow(contentRect: NSRect(x: 340, y: 0, width: 320, height: 180),
+                         styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        a.isReleasedWhenClosed = false
+        b.isReleasedWhenClosed = false
+        a.orderFront(nil); b.orderFront(nil)
+        // Supply the main/key-window lookup deterministically; this process need not steal desktop focus.
+        let activeWindow = PreviewWindowLookup()
+        activeWindow.window = a
+        let controller = QuickLookController(activeWindow: { activeWindow.window })
+        // These are the same ownership hooks called by SearchWindowRegistry on attach/detach.
+        controller.registerOwnerWindow(a)
+        controller.registerOwnerWindow(b)
+        let closeA = NotificationCenter.default.publisher(for: NSWindow.willCloseNotification, object: a)
+            .sink { _ in MainActor.assumeIsolated { controller.unregisterOwnerWindow(a) } }
+        let closeB = NotificationCenter.default.publisher(for: NSWindow.willCloseNotification, object: b)
+            .sink { _ in MainActor.assumeIsolated { controller.unregisterOwnerWindow(b) } }
+        let originalA = a.nextResponder
+        let originalB = b.nextResponder
+        defer {
+            controller.close()
+            a.close(); b.close()
+            closeA.cancel(); closeB.cancel()
+        }
+
+        controller.show([image])
+        precondition(controller.hasPendingRequest)
+        activeWindow.window = b
+        try await waitUntil { !controller.hasPendingRequest }
+        precondition(controller.numberOfPreviewItems(in: nil) == 0,
+                     "A request must not publish when another search window becomes active")
+        precondition(a.nextResponder === originalA && b.nextResponder === originalB)
+
+        activeWindow.window = a
+        controller.show([image])
+        precondition(controller.hasPendingRequest)
+        a.close()
+        precondition(!controller.hasPendingRequest, "Closing the owner must cancel its pending request immediately")
+        activeWindow.window = b
+        controller.show([unknown])
+        try await waitUntil { !controller.hasPendingRequest }
+        precondition(controller.numberOfPreviewItems(in: nil) == 1)
+        precondition((controller.previewPanel(nil, previewItemAt: 0) as? NSURL)?.path == unknown.path,
+                     "A closed owner's stale request must not replace B's file")
+        precondition(b.nextResponder === controller)
+
+        // Reattach A while B owns the panel; its independent close must leave B's preview alone.
+        controller.registerOwnerWindow(a)
+        a.orderFront(nil)
+        a.close()
+        precondition(controller.numberOfPreviewItems(in: nil) == 1)
+        precondition(b.nextResponder === controller)
+        precondition(QLPreviewPanel.shared()?.isVisible == true)
+        b.close()
+        precondition(controller.numberOfPreviewItems(in: nil) == 0)
+        precondition(b.nextResponder === originalB)
+        try await waitUntil { QLPreviewPanel.shared()?.isVisible == false }
     }
 
     @MainActor private static func cacheTests(_ first: PreviewFile.Fingerprint, _ second: PreviewFile.Fingerprint) {
@@ -304,4 +377,8 @@ import QuickLookThumbnailing
     }
 
     func cancel(_ request: QLThumbnailGenerator.Request) { cancelled.insert(ObjectIdentifier(request)) }
+}
+
+@MainActor private final class PreviewWindowLookup {
+    weak var window: NSWindow?
 }
