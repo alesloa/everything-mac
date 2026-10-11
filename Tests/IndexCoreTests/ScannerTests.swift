@@ -91,3 +91,34 @@ import Foundation
     // Scanner stores the root's full absolute path, so path(of:) is absolute.
     #expect(reconstructed == root.path + "/sub/b.txt", "expected absolute path \(root.path)/sub/b.txt, got \(reconstructed)")
 }
+
+@Test func wholeDiskScannerCanDisableStartupDiskWithoutLosingExternalDisks() throws {
+    let manager = FileManager.default
+    let root = manager.temporaryDirectory.appendingPathComponent("volume-choice-\(UUID().uuidString)")
+    defer { try? manager.removeItem(at: root) }
+    for path in ["Users", "Volumes/Enabled", "Volumes/Excluded", "Volumes/Network"] {
+        let directory = root.appendingPathComponent(path)
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data([1]).write(to: directory.appendingPathComponent("item.txt"))
+    }
+    var rules = ExcludeRules(pathPrefixes: [root.path + "/Volumes/Excluded", root.path + "/Volumes/Network"])
+    func paths(_ store: FileStore) -> Set<String> {
+        Set((0..<UInt32(store.count)).map { store.path(of: $0) })
+    }
+    let all = ParallelScanner.scanWholeDisk(rules: rules, fileSystemRoot: root.path, isCancelled: { false })
+    #expect(paths(all).contains(root.path + "/Users/item.txt"))
+    rules.excludeBootVolume = true
+    let external = ParallelScanner.scanWholeDisk(rules: rules, fileSystemRoot: root.path + "/", isCancelled: { false })
+    #expect(external.scanCompleted && external.path(of: external.rootID) == root.path + "/Volumes")
+    #expect(paths(external).contains(root.path + "/Volumes/Enabled/item.txt"))
+    #expect(!paths(external).contains(root.path + "/Users/item.txt"))
+    #expect(!paths(external).contains(root.path + "/Volumes/Excluded/item.txt"))
+    #expect(!paths(external).contains(root.path + "/Volumes/Network/item.txt"))
+    // Share scans remain independent of the startup-disk switch.
+    let share = ParallelScanner.scan(root: root.path + "/Volumes/Network", rules: ExcludeRules(excludeBootVolume: true),
+                                     volID: 2, workers: 2)
+    #expect(paths(share).contains(root.path + "/Volumes/Network/item.txt"))
+    rules.excludeBootVolume = false
+    #expect(paths(ParallelScanner.scanWholeDisk(rules: rules, fileSystemRoot: root.path))
+        .contains(root.path + "/Users/item.txt"))
+}

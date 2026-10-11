@@ -13,6 +13,7 @@ import IndexCore
     @Published var excludeVCSFolders = true
     @Published var excludeTrash = true
     @Published var networkShares: [NetworkShare] = []
+    @Published var indexBootVolume = true
 
     func load(from rules: ExcludeRules) {
         namesText = rules.names.sorted().joined(separator: "\n")
@@ -23,6 +24,7 @@ import IndexCore
         excludeVCSFolders = rules.excludeVCSFolders
         excludeTrash = rules.excludeTrash
         networkShares = rules.networkShares
+        indexBootVolume = !rules.excludeBootVolume
     }
 
     func makeRules() -> ExcludeRules {
@@ -38,7 +40,8 @@ import IndexCore
                             excludeVCSFolders: excludeVCSFolders,
                             excludeTrash: excludeTrash,
                             excludeFilePatterns: lines(filePatternsText),
-                            networkShares: networkShares)
+                            networkShares: networkShares,
+                            excludeBootVolume: !indexBootVolume)
     }
 }
 

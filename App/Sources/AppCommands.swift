@@ -106,7 +106,7 @@ struct AppCommands: Commands {
             }))
             // Source: the indexed-folder features defined by FolderSnapshot and this window's saved preferences.
             Toggle("Folder Sidebar", isOn: Binding(get: { model.folderSidebarVisible }, set: {
-                model.folderSidebarVisible = $0; model.savePrefs(); model.refreshFolderDetailsIfNeeded()
+                model.setFolderSidebarVisible($0)
             }))
             Toggle("Indexed Folder Totals", isOn: Binding(get: { model.indexedFolderTotals }, set: {
                 model.setFolderTotals($0)

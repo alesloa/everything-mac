@@ -126,6 +126,8 @@ The first launch scans the whole disk and writes the index to a cache, so it tak
 
 ### Network volumes
 
+In Settings > Volumes, turn off any local drive under **Drives to index**, including the startup drive, then click **Apply & Re-index**. Turning off the startup drive excludes its files while keeping enabled external drives and selected network shares searchable. These choices persist across launches.
+
 In Settings > Volumes, choose **Add Network Volume…**, select a mounted share or a folder on it, then click **Apply & Re-index**. The whole share is indexed separately from local drives. Automatic reconnection requires credentials already saved by Finder.
 
 Selected shares refresh every five minutes by default, after reconnecting, or when you rebuild the index. Settings > Volumes offers per-share refresh intervals, pause, manual refresh, and cancellation. Cached results remain searchable during refresh and while a share is offline; opening a result requires the share to be reachable.
@@ -148,6 +150,8 @@ regex:"report[0-9]+"
 Quoted words use literal matching. Boolean groups, metadata predicates, and search options share the same behavior in native search, catalogs, and the command-line tool where metadata is available. Invalid queries display their actual validation error. Save the current search from **Bookmarks**, and use **History** to revisit searches. Each tab and window retains its own query, options, folder scope, and sort order.
 
 Open **Filters** beside the search field to select multiple file types and optional **Over** and **Under** size limits, then click **Apply**. **Everything** checks or clears the type group; each type stays independently selectable, and Files includes every file type. Selected types form a union; size limits narrow that union to files strictly above or below the entered sizes. Choose MB or GB for decimal units, and use **Clear All**, then **Apply**, to remove filters while keeping the search text. Filters are retained in saved searches and tabs.
+
+Use **View > Folder Sidebar** to limit the current tab to a drive or folder. Close the sidebar with its close button or the View menu to search all indexed folders again. The search text, type and size filters, and sorting remain in place. Opening a saved search with a folder restriction shows the sidebar so its selected location is visible.
 
 ### Previews, totals, and file tools
 

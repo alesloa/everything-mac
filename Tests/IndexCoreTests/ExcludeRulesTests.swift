@@ -123,4 +123,17 @@ import Foundation
     #expect(rules.excludeHidden)
     #expect(rules.excludeDevFolders)
     #expect(rules.excludeVCSFolders)
+    #expect(!rules.excludeBootVolume)
+}
+
+@Test func startupVolumeChoiceRoundTripsAndInvalidatesTheCache() throws {
+    var rules = ExcludeRules.defaults
+    let fingerprint = rules.fingerprint()
+    #expect(rules.localScanRoot == "/")
+    rules.excludeBootVolume = true
+    #expect(rules.localScanRoot == "/Volumes" && rules.fingerprint() != fingerprint)
+    let decoded = try JSONDecoder().decode(ExcludeRules.self, from: JSONEncoder().encode(rules))
+    #expect(decoded == rules && decoded.excludeBootVolume)
+    rules.excludeBootVolume = false
+    #expect(rules.fingerprint() == fingerprint)
 }
