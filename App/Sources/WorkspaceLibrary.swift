@@ -13,7 +13,9 @@ final class WorkspaceLibrary: ObservableObject {
     private var claimedWindowIDs: Set<UUID> = []
     private var saveTask: Task<Void, Never>?
     private var recoveryRequired = false
+    private var matchingDefaultsMigrationPending = false
     private static let defaultsKey = "workspace.archive.v1"
+    private static let literalDefaultKey = "pref.literalSearchDefault.v1"
 
     init(preferences: UserDefaults = .standard, storageURL: URL? = nil) {
         self.preferences = preferences
@@ -32,6 +34,20 @@ final class WorkspaceLibrary: ObservableObject {
             // Source: the persistence operation's actual Foundation/decoder error.
             storageError = error.localizedDescription
         }
+        adoptLiteralSearchDefault()
+    }
+
+    private func adoptLiteralSearchDefault() {
+        guard !preferences.bool(forKey: Self.literalDefaultKey) else { return }
+        // Older builds enabled fuzzy automatically. Reset ordinary restored tabs
+        // once; explicit bookmarks and historical search options retain their meaning.
+        preferences.set(false, forKey: "pref.fuzzy")
+        for wi in archive.windows.indices {
+            for ti in archive.windows[wi].tabs.indices { archive.windows[wi].tabs[ti].state.fuzzy = false }
+        }
+        matchingDefaultsMigrationPending = true
+        // Preserve unreadable archives until the existing recovery path saves safely.
+        if storageError == nil { flush() }
     }
 
     var savedWindowIDs: [String] { archive.restoreSession ? archive.windows.map { $0.id.uuidString } : [] }
@@ -138,6 +154,10 @@ final class WorkspaceLibrary: ObservableObject {
             if let store { try store.save(persisted) }
             else { preferences.set(try SearchWorkspaceStore.encode(persisted), forKey: Self.defaultsKey) }
             storageError = nil
+            if matchingDefaultsMigrationPending {
+                preferences.set(true, forKey: Self.literalDefaultKey)
+                matchingDefaultsMigrationPending = false
+            }
         } catch {
             // Source: the attempted workspace write's actual error, with no invented diagnostic code.
             storageError = error.localizedDescription

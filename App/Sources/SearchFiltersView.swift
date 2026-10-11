@@ -114,7 +114,11 @@ struct SearchFiltersPopover: View {
                 Toggle("Whole Word", isOn: option(\.wholeWord))
                 Toggle("Fuzzy Matching", isOn: option(\.fuzzy))
                     .disabled(options.wholeWord || options.regex || options.matchPrefix || options.matchSuffix)
+                    .help("Allows gaps between letters; turn off for consecutive text matching.")
             }.toggleStyle(.checkbox)
+            // Source: FuzzyMatcher's subsequence matching and the owner's expo search complaint.
+            Text("Fuzzy matching allows gaps between letters.")
+                .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Advanced Search…") { close(); model.activePanel = .advancedSearch }
                 Spacer()

@@ -13,6 +13,9 @@ struct SearchSettingsView: View {
                 // Source: the owner's fuzzy-search request and QueryEngine's ranking.
                 Toggle("Fuzzy matching", isOn: fuzzyBinding)
                     .disabled(model.wholeWord || model.regex || model.matchPrefix || model.matchSuffix)
+                    .help("Allows gaps between letters; turn off for consecutive text matching.")
+                // Source: FuzzyMatcher's optional subsequence matching.
+                Text("Fuzzy matching allows gaps between letters.").foregroundStyle(.secondary)
                 if model.wholeWord {
                     // Source: Query.hasFuzzyTerms disables fuzzy for whole-word queries.
                     Text("Whole-word matching uses exact terms.").foregroundStyle(.secondary)

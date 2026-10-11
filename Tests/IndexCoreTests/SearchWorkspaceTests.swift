@@ -3,6 +3,24 @@ import Testing
 @testable import IndexCore
 
 @Suite struct SearchWorkspaceTests {
+    @Test func plainSearchMatchesConsecutiveTextAndFuzzyRequiresOptIn() async {
+        var store = FileStore()
+        let root = store.append(name: "/fixture", parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
+        for name in ["expo", "Expo.app", "export.swift", "e_x_p_o.txt", "index-position.txt", "photo.png"] {
+            store.append(name: name, parent: root, size: 1, mtime: 0, isDir: false, volID: 1)
+        }
+        let index = SearchIndex(); index.publish(store)
+        var state = SearchWorkspaceState(query: "expo")
+        state.filters = SearchFilters(types: [.files])
+        #expect(!state.fuzzy && state.sortKey == "name")
+        let literal = Set(["expo", "Expo.app", "export.swift"])
+        #expect(Set(await index.search(state.searchQuery).map(\.name)) == literal)
+        state.fuzzy = true
+        #expect(Set(await index.search(state.searchQuery).map(\.name)) == literal.union(["e_x_p_o.txt", "index-position.txt"]))
+        state.fuzzy = false
+        #expect(Set(await index.search(state.searchQuery).map(\.name)) == literal)
+    }
+
     @Test func completeStateRoundTripsWithoutSavingResults() throws {
         var state = SearchWorkspaceState(query: "name:\"Résumé report\" size:>1KiB")
         state.matchPath = true; state.caseSensitive = true; state.wholeWord = true; state.fuzzy = false
@@ -109,7 +127,7 @@ import Testing
         #expect(restored.windows[0].selectedTab.navigation.count == 200)
         #expect(restored.windows[0].selectedTab.navigationIndex == 199)
         #expect(restored.windows[0].selectedTab.state.resultLimit == 100)
-        #expect(restored.windows[0].selectedTab.state.sortKey == "relevance")
+        #expect(restored.windows[0].selectedTab.state.sortKey == "name")
     }
 
     @Test func macrosExpandSavedQueriesWithGroupingAndPreserveQuotedLiterals() throws {

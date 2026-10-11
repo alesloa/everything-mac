@@ -4,6 +4,13 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [0.5.1] - 2026-10-11
+
+### Fixed
+- Normal searches match consecutive filename text by default, so `expo` finds `export.swift` without accepting scattered letters.
+- Restored ordinary tabs switch to substring matching once; saved searches, history, sorting, and size filters retain their saved values.
+- New searches use Name ordering, and fuzzy matching remains an opt-in with an explanation of its letter-gap behavior.
+
 ## [0.5.0] - 2026-10-11
 
 ### Added
@@ -97,6 +104,7 @@ All notable changes to EverythingMac are recorded here. The format is based on
 ### Added
 - First public release. Instant filename and folder search across every mounted volume, updating as you type. FSEvents-backed live index, a binary on-disk cache for instant restarts, and right-click actions (Open, Open With, Reveal in Finder, Copy Path/Name, Move to Trash).
 
+[0.5.1]: https://github.com/alesloa/everything-mac/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/alesloa/everything-mac/compare/v0.3.0...v0.5.0
 [0.3.0]: https://github.com/alesloa/everything-mac/releases/tag/v0.3.0
 [0.2.2]: https://github.com/alesloa/everything-mac/releases/tag/v0.2.2
