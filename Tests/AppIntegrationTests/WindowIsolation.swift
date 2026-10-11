@@ -39,6 +39,7 @@ import IndexCore
         first.query = "first"; second.query = "second"
         await first.runSearch(); await second.runSearch()
         check(first.results.map(\.name) == ["first.txt"])
+        check(first.totalMatches == 1 && first.resultSnapshotID != nil)
         check(second.results.map(\.name) == ["second.txt"])
         first.caseSensitive = true; first.sortKey = .size
         check(second.query == "second" && !second.caseSensitive && second.sortKey != .size,
@@ -78,10 +79,16 @@ import IndexCore
         }
         check(first.results.map(\.name) == ["first.txt"], "Restored results \(first.results.map(\.name))")
         check(second.query == "second" && second.workspace.window.tabs.count == 1)
+        first.setFolderScope(FolderScope(path: "/"))
+        first.indexedFolderTotals = true
+        first.folderSidebarVisible = true
         first.persistWorkspace(); second.persistWorkspace()
         let restored = WorkspaceLibrary(preferences: preferences)
         check(restored.archive.windows.count == 2)
         check(restored.archive.windows.contains { $0.tabs.count == 2 })
+        check(restored.archive.windows.contains {
+            $0.selectedTab.state.folderScopePath == "/" && $0.selectedTab.state.indexedFolderTotals == true
+        })
         print("PASS: windows keep independent searches and receive shared index updates")
     }
 }

@@ -5,6 +5,7 @@ struct StatusBar: View {
     var shown: Int
     var scanning: Bool
     var shares: [NetworkShareStatus] = []
+    var matches: Int? = nil
     var body: some View {
         HStack(spacing: 6) {
             if scanning {
@@ -26,7 +27,9 @@ struct StatusBar: View {
                 }
             }
             Spacer()
-            Text("\(shown.formatted()) results")
+            // Source: shown rows and the total count from the same accepted SearchReport.
+            if let matches { Text("\(shown.formatted()) shown · \(matches.formatted()) matches") }
+            else { Text("\(shown.formatted()) results") }
         }
         .font(.system(size: 11)).foregroundStyle(.secondary)
         .padding(.horizontal, 10).padding(.vertical, 4)

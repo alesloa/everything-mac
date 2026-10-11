@@ -113,6 +113,7 @@ private struct WorkspaceStateOptions: View {
             Toggle("Match case", isOn: $state.caseSensitive)
             Toggle("Match whole word", isOn: $state.wholeWord)
             Toggle("Fuzzy matching", isOn: $state.fuzzy)
+                .disabled(state.wholeWord || state.regex || state.matchPrefix || state.matchSuffix)
             Toggle("Regular expression", isOn: $state.regex)
             Toggle("Ignore diacritics", isOn: $state.diacriticInsensitive)
             Toggle("Match prefix", isOn: $state.matchPrefix)
@@ -129,6 +130,15 @@ private struct WorkspaceStateOptions: View {
             Stepper("Maximum results: \(state.resultLimit)", value: $state.resultLimit, in: 100...100_000, step: 100)
             Toggle("Show preview", isOn: $state.previewVisible)
             Toggle("Show thumbnails", isOn: $state.thumbnailView)
+            // Source: the saved view/scope values defined by SearchWorkspaceState.
+            Toggle("Show folder sidebar", isOn: Binding(get: { state.folderSidebarVisible ?? false },
+                set: { state.folderSidebarVisible = $0 }))
+            Toggle("Show indexed folder totals", isOn: Binding(get: { state.indexedFolderTotals ?? false },
+                set: { state.indexedFolderTotals = $0 }))
+            if let path = state.folderScopePath {
+                LabeledContent("Folder scope", value: path)
+                Button("Clear folder scope") { state.folderScopePath = nil }
+            }
         }
     }
 }

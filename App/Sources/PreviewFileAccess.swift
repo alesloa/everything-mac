@@ -20,39 +20,46 @@ struct PreviewFile: Sendable {
 }
 
 enum PreviewFileAccess {
+    private static let probes = BackgroundFileJobLimiter(maximumActive: 4)
+
     static func resolve(_ record: FileRecord, allowsNetwork: Bool = false) async -> PreviewFile? {
-        let worker = Task.detached(priority: .utility) {
-            inspect(record, allowsNetwork: allowsNetwork)
-        }
+        let cancellation = BackgroundFileJobCancellation()
         return await withTaskCancellationHandler {
-            let result = await worker.value
-            return Task.isCancelled ? nil : result
-        } onCancel: { worker.cancel() }
+            if Task.isCancelled { cancellation.cancel() }
+            return await probes.withPermit(cancellation: cancellation, cancelled: { nil }) {
+                let worker = Task.detached(priority: .utility) {
+                    inspect(record, allowsNetwork: allowsNetwork, isCancelled: { cancellation.isCancelled })
+                }
+                let result = await worker.value
+                return cancellation.isCancelled ? nil : result
+            }
+        } onCancel: { cancellation.cancel() }
     }
 
     // This entire probe runs off the main actor. It never opens file contents,
     // requests an iCloud download or invokes a provider for a dataless file.
-    static func inspect(_ record: FileRecord, allowsNetwork: Bool) -> PreviewFile? {
-        guard !Task.isCancelled, !record.isDir, record.path.hasPrefix("/"),
+    static func inspect(_ record: FileRecord, allowsNetwork: Bool,
+                        isCancelled: @Sendable () -> Bool = { Task.isCancelled }) -> PreviewFile? {
+        guard !isCancelled(), !record.isDir, record.path.hasPrefix("/"),
               !record.path.utf8.contains(0),
               allowsNetwork || isOnLocalMount(record.path) else { return nil }
         var metadata = stat()
         guard record.path.withCString({ lstat($0, &metadata) }) == 0,
               metadata.st_mode & S_IFMT == S_IFREG,
               metadata.st_flags & UInt32(SF_DATALESS) == 0,
-              !Task.isCancelled else { return nil }
+              !isCancelled() else { return nil }
         // Refuse symlink ancestors as well: a local-looking path must not reach
         // a remote filesystem or a cloud placeholder through an alternate path.
         var parent = (record.path as NSString).deletingLastPathComponent
         while parent != "/" && !parent.isEmpty {
             var ancestor = stat()
-            guard !Task.isCancelled, parent.withCString({ lstat($0, &ancestor) }) == 0,
+            guard !isCancelled(), parent.withCString({ lstat($0, &ancestor) }) == 0,
                   ancestor.st_mode & S_IFMT == S_IFDIR else { return nil }
             parent = (parent as NSString).deletingLastPathComponent
         }
         let url = URL(fileURLWithPath: record.path)
         guard let values = try? url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]),
-              !Task.isCancelled else { return nil }
+              !isCancelled() else { return nil }
         if values.isUbiquitousItem == true {
             guard values.ubiquitousItemDownloadingStatus == .current ||
                     values.ubiquitousItemDownloadingStatus == .downloaded else { return nil }

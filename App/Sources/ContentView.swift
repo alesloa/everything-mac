@@ -27,7 +27,8 @@ struct ContentView: View {
                 Divider()
             }
             SearchField(text: $model.query, matchPath: $model.matchPath, fuzzy: $model.fuzzy,
-                        wholeWord: model.wholeWord, focused: $searchFocused) { model.queryChanged() }
+                        wholeWord: model.wholeWord, focused: $searchFocused, onChange: { model.queryChanged() },
+                        fuzzyAvailable: !(model.regex || model.matchPrefix || model.matchSuffix))
             WorkspaceTabBar()
             HStack {
                 // Source: the built-in SearchFilter definitions and the owner's
@@ -46,25 +47,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
             Divider()
-            HSplitView {
-                if model.thumbnailView {
-                    ThumbnailResultsView(rows: model.results, selectedRecords: model.actionRecords,
-                        onSelection: { model.selectRecords($0) }, onActivate: { ResultActions.open($0) },
-                        onPreview: { QuickLookController.shared.toggle($0, allowsNetwork: model.previewAllowsNetwork) },
-                        allowsNetwork: model.previewAllowsNetwork)
-                } else {
-                    ResultsTable(rows: model.results,
-                        onSort: { k, a in model.setSort(k, ascending: a) },
-                        onSelect: { model.selectedID = $0?.id }, onActivate: { ResultActions.open($0) },
-                        onSelection: { model.selectRecords($0) },
-                        onPreview: { QuickLookController.shared.toggle($0, allowsNetwork: model.previewAllowsNetwork) },
-                        selectedRecords: model.actionRecords)
-                }
-                if model.previewVisible {
-                    PreviewPane(records: model.actionRecords, allowsNetwork: model.previewAllowsNetwork)
-                        .frame(minWidth: 220, idealWidth: 320)
-                }
-            }
+            SearchResultsArea(model: model)
             if ResultActions.state.isBusy {
                 HStack {
                     // Source: the running task represented by FileActionState.isBusy.
@@ -76,7 +59,7 @@ struct ContentView: View {
             }
             Divider()
             StatusBar(total: model.total, shown: model.results.count, scanning: model.scanning,
-                      shares: model.shares)
+                      shares: model.shares, matches: model.totalMatches)
         }
         .background(.regularMaterial)
         .onAppear { searchFocused = true }
@@ -112,9 +95,14 @@ struct ContentView: View {
                 case .success(let query):
                     NativeResultsExportView(index: model.index.searchIndex, query: query,
                         selected: model.actionRecords, shown: model.results,
-                        sort: model.sortKey, ascending: model.ascending)
+                        sort: model.sortKey, ascending: model.ascending, folderPath: model.folderScope?.path)
                 case .failure(let error): featureError(error)
                 }
+            case .duplicates:
+                if case .failure(let error) = model.featureQueryResult { featureError(error) }
+                DuplicateFinderView(index: model.index.searchIndex,
+                    query: try? model.featureQueryResult.get(), selectedPaths: model.actionRecords.map(\.path),
+                    folderPath: model.folderScope?.path)
             default: EmptyView()
             }
         }

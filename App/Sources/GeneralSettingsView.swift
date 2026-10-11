@@ -24,7 +24,8 @@ struct GeneralSettingsView: View {
                                        value: modified.formatted(date: .abbreviated, time: .shortened))
                     }
                 } else {
-                    LabeledContent("Cache", value: "not written yet")
+                    // Source: FileManager did not return usable attributes for this cache path.
+                    LabeledContent("Cache", value: "Unavailable")
                 }
                 Button(model.scanning ? "Rebuilding…" : "Rebuild Index Now") { model.rebuildIndex() }
                     .disabled(model.scanning)

@@ -7,6 +7,7 @@ struct SearchField: View {
     var wholeWord: Bool
     var focused: FocusState<Bool>.Binding
     var onChange: () -> Void
+    var fuzzyAvailable = true
     var body: some View {
         HStack {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -19,7 +20,7 @@ struct SearchField: View {
             // Source: the owner's request for fuzzy file search; the switch reflects
             // the persisted AppModel search option, never inferred file metadata.
             Toggle("Fuzzy", isOn: $fuzzy).toggleStyle(.switch)
-                .disabled(wholeWord)
+                .disabled(wholeWord || !fuzzyAvailable)
                 .onChange(of: fuzzy) { onChange() }
         }
         .padding(8)

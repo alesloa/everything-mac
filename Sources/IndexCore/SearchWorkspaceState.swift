@@ -20,6 +20,11 @@ public struct SearchWorkspaceState: Codable, Equatable, Sendable {
     public var resultLimit = 5000
     public var previewVisible = false
     public var thumbnailView = false
+    // Source: these optional view/scope fields preserve older workspace archives;
+    // paths are owner-selected indexed folders, and absent flags use app defaults.
+    public var folderScopePath: String?
+    public var folderSidebarVisible: Bool?
+    public var indexedFolderTotals: Bool?
 
     public init(query: String = "") { self.query = query }
 
@@ -33,7 +38,7 @@ public struct SearchWorkspaceState: Codable, Equatable, Sendable {
 
     public var hasSearch: Bool {
         !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || searchFilter != .all || customFilterID != nil
+            || searchFilter != .all || customFilterID != nil || folderScopePath != nil
     }
 
     public mutating func normalize() {

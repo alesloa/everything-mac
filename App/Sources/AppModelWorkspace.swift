@@ -12,6 +12,8 @@ extension AppModel {
         state.searchFilter = searchFilter; state.customFilterID = workspace.window.selectedTab.state.customFilterID
         state.sortKey = Self.sortKeyName(sortKey); state.ascending = ascending; state.resultLimit = resultLimit
         state.previewVisible = previewVisible; state.thumbnailView = thumbnailView
+        state.folderScopePath = folderScope?.path
+        state.folderSidebarVisible = folderSidebarVisible; state.indexedFolderTotals = indexedFolderTotals
         return state
     }
 
@@ -29,6 +31,11 @@ extension AppModel {
         ignorePunctuation = state.ignorePunctuation; ignoreWhitespace = state.ignoreWhitespace
         searchFilter = state.searchFilter; sortKey = Self.sortKey(from: state.sortKey); ascending = state.ascending
         resultLimit = state.resultLimit; previewVisible = state.previewVisible; thumbnailView = state.thumbnailView
+        folderScope = state.folderScopePath.map { FolderScope(path: $0) }
+        folderSidebarVisible = state.folderSidebarVisible ?? false
+        indexedFolderTotals = state.indexedFolderTotals ?? false
+        indexedTotalsColumnOverride = state.indexedFolderTotals
+        refreshFolderDetailsIfNeeded()
         selectedRecords = []; selectedID = nil; results = []
         workspace.stage(state)
         if search { Task { await runSearch() }; focusSearch() }
