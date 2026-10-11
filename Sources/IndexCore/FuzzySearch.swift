@@ -95,7 +95,7 @@ extension QueryEngine {
                         }
                         guard fits else { continue }
                         let range = store.nameRange(of: id)
-                        let name = UnsafeBufferPointer(start: arena.baseAddress?.advanced(by: range.lowerBound), count: range.count)
+                        let name = arena.bytes(in: range)
                         if let value = evaluate(id, name: name, mask: mask, path: nil) {
                             out.append(SearchMatch(id: id, score: value))
                         }

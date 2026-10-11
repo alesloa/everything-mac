@@ -19,6 +19,7 @@ actor IndexActor {
     nonisolated let searchIndex = SearchIndex()
     private let cacheWriter = IndexCacheWriter()
     private var cacheRevision: UInt64 = 0
+    private var compactionID: UUID?
     private var storeGeneration: UInt64 = 0
     private var storeFingerprint: UInt64?
     private var rules = ExcludeRules.defaults
@@ -85,6 +86,31 @@ actor IndexActor {
     private func publishStore() {
         searchIndex.publish(store)
         onLiveChange?()
+        scheduleCompaction()
+    }
+
+    // Packing and mapping never run on the filesystem writer or reader lock.
+    // Stable slots let adoption retain updates made during detached compaction.
+    private func scheduleCompaction() {
+        guard compactionID == nil, rebuildID == nil, store.needsCompaction else { return }
+        let id = UUID(), generation = storeGeneration
+        let snapshot = store.storageSnapshot(), revision = snapshot.revision
+        compactionID = id
+        Task {
+            let compacted = await Task.detached(priority: .utility) { try? snapshot.compacted() }.value
+            self.finishCompaction(compacted, id: id, generation: generation, revision: revision)
+        }
+    }
+
+    private func finishCompaction(_ compacted: FileStore?, id: UUID, generation: UInt64, revision: UInt64) {
+        guard compactionID == id else { return }
+        compactionID = nil
+        guard generation == storeGeneration, rebuildID == nil, let compacted,
+              store.adoptCompaction(compacted, expectedRevision: revision) else { return }
+        // Storage changed, not records or event checkpoints. Readers with old
+        // snapshots keep their old mapping and any cached candidate sets alive.
+        searchIndex.publish(store)
+        scheduleCompaction()
     }
 
     func currentRules() -> ExcludeRules { rules }
@@ -157,7 +183,11 @@ actor IndexActor {
         let effective = effectiveRules()
         let prog = onProgress
         let newStore = await Task.detached(priority: .userInitiated) {
-            ParallelScanner.scanWholeDisk(rules: effective) { count in prog?(count) }
+            var scanned = ParallelScanner.scanWholeDisk(rules: effective) { count in prog?(count) }
+            if let compacted = try? scanned.storageSnapshot().compacted() {
+                scanned.adoptCompaction(compacted, expectedRevision: scanned.revision)
+            }
+            return scanned
         }.value
         guard rebuildID == id else { return }
         store = newStore
@@ -493,7 +523,7 @@ actor IndexActor {
         // Keep the last safely applied checkpoint; the current system event id
         // can include directories still waiting in our coalesced event queue.
         cacheRevision &+= 1
-        try? await cacheWriter.save(store, to: Self.cacheURL(), lastEventID: lastEventID,
+        try? await cacheWriter.save(store.storageSnapshot(), to: Self.cacheURL(), lastEventID: lastEventID,
                                     rulesFingerprint: fingerprint, revision: cacheRevision)
     }
 }

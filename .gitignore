@@ -25,3 +25,5 @@ Tests/IndexCoreTests/*
 
 # Internal design/planning notes (not needed to build or use the app)
 docs/
+
+!Tests/IndexCoreTests/MappedStoreTests.swift
