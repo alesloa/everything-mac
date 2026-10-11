@@ -18,11 +18,14 @@ final class StoreBytes: @unchecked Sendable {
         let clone = url.deletingLastPathComponent().appendingPathComponent(".mapped-\(UUID().uuidString).tmp")
         let isolated = clonefile(url.path, clone.path, 0) == 0
         defer { if isolated { unlink(clone.path) } }
-        let fd = open((isolated ? clone : url).path, O_RDONLY | O_CLOEXEC)
+        // A corrupted/replaced cache path may be a FIFO. Never wait for a writer
+        // before fstat can reject it; O_NONBLOCK does not alter regular files.
+        let fd = open((isolated ? clone : url).path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)
         guard fd >= 0 else { throw IndexCache.CacheError() }
         defer { close(fd) }
         var info = stat()
-        guard fstat(fd, &info) == 0, info.st_size > 0, info.st_size <= Int.max else {
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_size > 0, info.st_size <= Int.max else {
             throw IndexCache.CacheError()
         }
         count = Int(info.st_size)

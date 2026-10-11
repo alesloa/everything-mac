@@ -70,24 +70,32 @@ public final class LiveMonitor: @unchecked Sendable {
         let haveStat = lstat(directory, &dst) == 0
         let diskMtimeNs = haveStat
             ? Int64(dst.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(dst.st_mtimespec.tv_nsec) : 0
-        if haveStat, (dst.st_mode & S_IFMT) == S_IFDIR, store.reconcileMtime(of: dirID) == diskMtimeNs { return false }
+        if haveStat, (dst.st_mode & S_IFMT) == S_IFDIR, !store.subtreeIsIncomplete(dirID),
+           store.reconcileMtime(of: dirID) == diskMtimeNs { return false }
 
         // Children of other volumes (a network share grafted under /Volumes) are
         // managed by their own scan, so only this volume's records are diffed away.
         let allChildren = store.childIDs(of: dirID)
         let existing = allChildren.filter { store.volID(of: $0) == volID }
 
-        guard let dir = Scanner.openDirectory(directory) else {
+        guard let dir = Scanner.openDirectory(directory, relativeTo: store.name(of: store.rootID)) else {
             // Permission, TCC and transient I/O failures do not prove deletion.
             // Preserve the last-known children and leave the mtime gate unset so
             // a later successful listing can retry without a structural change.
             let failure = errno
-            guard failure == ENOENT || failure == ENOTDIR || failure == ELOOP else { return false }
+            guard failure == ENOENT || failure == ENOTDIR || failure == ELOOP else {
+                store.setSubtreeIncomplete(dirID, true); return false
+            }
             var changed = false
             for id in existing { store.markSubtreeDeleted(id); changed = true }
             return changed
         }
         defer { closedir(dir) }
+        // Capture before listing: a mutation after the read must leave a changed
+        // mtime for its later FSEvent, rather than caching that newer timestamp.
+        let haveListedStat = fstat(dirfd(dir), &dst) == 0
+        let listedMtimeNs = haveListedStat
+            ? Int64(dst.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(dst.st_mtimespec.tv_nsec) : 0
 
         // First pass: names + project-marker detection, so live reconcile applies the
         // SAME marker-scoped exclusion the full scan did (generic names like "build"
@@ -98,7 +106,7 @@ public final class LiveMonitor: @unchecked Sendable {
             errno = 0
             guard let e = readdir(dir) else {
                 // Never diff away entries using a failed/partial directory read.
-                if errno != 0 { return false }
+                if errno != 0 { store.setSubtreeIncomplete(dirID, true); return false }
                 break
             }
             let name = withUnsafePointer(to: e.pointee.d_name) {
@@ -122,21 +130,30 @@ public final class LiveMonitor: @unchecked Sendable {
             // Check before lstat: even stat'ing a stalled share can block.
             if foreignNames.contains(name) || nonLocalMounts.contains(full) { onDisk.insert(name); continue }
             var st = stat()
-            guard lstat(full, &st) == 0 else {
+            guard fstatat(dirfd(dir), name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_size >= 0 else {
                 onDisk.insert(name); completed = false; continue
             }
             let isDir = (st.st_mode & S_IFMT) == S_IFDIR
             if !isDir && rules.shouldExcludeFile(name: name) { continue }
             onDisk.insert(name)
             if let prior = existingByName[name] {
-                if prior.allSatisfy({ store.isDir(of: $0) == isDir }) { continue }
+                if prior.allSatisfy({ store.isDir(of: $0) == isDir }) {
+                    if isDir, prior.contains(where: { store.subtreeIsIncomplete($0) }) {
+                        // Retry only known failed subtrees. Diffing existing children
+                        // avoids appending duplicates after a partially successful walk.
+                        if reconcile(directory: full, in: &store, rules: rules, volID: volID,
+                                     newlyIndexedDirs: &newlyIndexedDirs) { changed = true }
+                        if prior.contains(where: { store.subtreeIsIncomplete($0) }) { completed = false }
+                    }
+                    continue
+                }
                 // A same-name replacement can change file ↔ directory/symlink.
                 // Replace its stable slot and tombstone old descendants before
                 // adding the new type; content-only changes still do no work.
                 for id in prior { store.markSubtreeDeleted(id) }
                 changed = true
             }
-            let newID = store.append(name: name, parent: dirID, size: UInt64(max(0, st.st_size)),
+            let newID = store.append(name: name, parent: dirID, size: UInt64(st.st_size),
                                      mtime: Int64(st.st_mtimespec.tv_sec), isDir: isDir, volID: volID)
             changed = true
             if isDir {
@@ -153,7 +170,8 @@ public final class LiveMonitor: @unchecked Sendable {
         }
         // Remember the mtime we just reconciled at so repeat events for this dir
         // (with the same mtime) take the cheap skip above instead of re-reading it.
-        if haveStat && completed { store.setReconcileMtime(dirID, diskMtimeNs) }
+        store.setSubtreeIncomplete(dirID, !completed)
+        if completed && haveListedStat { store.setReconcileMtime(dirID, listedMtimeNs) }
         return changed
     }
 

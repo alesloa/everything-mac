@@ -110,7 +110,7 @@ public enum ParallelScanner {
                             progress: (@Sendable (Int) -> Void)? = nil) -> FileStore {
         guard !isCancelled() else { return FileStore() }
         let rootName = Scanner.normalizedRoot(root)
-        guard let rootEntries = readDirectory(rootName, rules: rules, isCancelled: isCancelled) else { return FileStore() }
+        guard let rootEntries = readDirectory(rootName, root: rootName, rules: rules, isCancelled: isCancelled) else { return FileStore() }
         let builder = Builder(volID: volID, progress: progress)
         if rootEntries.incomplete { builder.markIncomplete() }
         let rootID = builder.appendRoot(name: rootName)
@@ -120,7 +120,7 @@ public enum ParallelScanner {
 
         DispatchQueue.concurrentPerform(iterations: max(1, workers)) { _ in
             while let (path, parent) = queue.claim(isCancelled: isCancelled) {
-                guard let listing = readDirectory(path, rules: rules, isCancelled: isCancelled) else {
+                guard let listing = readDirectory(path, root: rootName, rules: rules, isCancelled: isCancelled) else {
                     builder.markIncomplete(); queue.release(); continue
                 }
                 if listing.incomplete { builder.markIncomplete() }
@@ -137,8 +137,8 @@ public enum ParallelScanner {
         return isCancelled() ? FileStore() : builder.finish()
     }
 
-    // One directory level: readdir + lstat each entry, applying exclude rules.
-    // lstat (not stat) means symlinked directories are recorded but never
+    // One directory level: readdir + fstatat each entry, applying exclude rules.
+    // AT_SYMLINK_NOFOLLOW means symlinked directories are recorded but never
     // descended into, so the firmlink/symlink graph can't create scan loops.
     //
     // Two passes: the first reads names only (no stat) and notes whether this
@@ -146,9 +146,9 @@ public enum ParallelScanner {
     // applies the now-marker-aware exclude rules and stats only the survivors. The
     // marker pass is what lets generic names like "build"/"target" be skipped inside
     // a real project but kept for an unrelated user folder of the same name.
-    private static func readDirectory(_ path: String, rules: ExcludeRules,
+    private static func readDirectory(_ path: String, root: String, rules: ExcludeRules,
                                       isCancelled: @Sendable () -> Bool) -> (entries: [Entry], incomplete: Bool)? {
-        guard !isCancelled(), let dir = Scanner.openDirectory(path) else { return nil }
+        guard !isCancelled(), let dir = Scanner.openDirectory(path, relativeTo: root) else { return nil }
         defer { closedir(dir) }
         var names: [String] = []
         var inProjectDir = false
@@ -175,12 +175,14 @@ public enum ParallelScanner {
             let isHidden = name.hasPrefix(".")
             if rules.shouldExclude(name: name, path: full, isHidden: isHidden, inProjectDir: inProjectDir) { continue }
             var st = stat()
-            guard lstat(full, &st) == 0 else { incomplete = true; continue }
+            guard fstatat(dirfd(dir), name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_size >= 0 else {
+                incomplete = true; continue
+            }
             let isDir = (st.st_mode & S_IFMT) == S_IFDIR
             // File-name exclude patterns apply to files only.
             if !isDir && rules.shouldExcludeFile(name: name) { continue }
             out.append(Entry(name: name, path: full, isDir: isDir,
-                             size: UInt64(max(0, st.st_size)), mtime: Int64(st.st_mtimespec.tv_sec)))
+                             size: UInt64(st.st_size), mtime: Int64(st.st_mtimespec.tv_sec)))
         }
         return (out, incomplete)
     }

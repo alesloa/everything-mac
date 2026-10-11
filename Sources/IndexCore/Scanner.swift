@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 /// Recursively enumerates a directory tree into a FileStore.
-/// Uses readdir + lstat: lstat does not follow symlinks, so symlinked
+/// Uses readdir + fstatat without following symlinks, so symlinked
 /// directories are recorded as entries but never recursed into — prevents loops.
 public struct Scanner: Sendable {
     public let rules: ExcludeRules
@@ -16,9 +16,25 @@ public struct Scanner: Sendable {
         return root
     }
 
-    // Never follow a directory replaced by a symlink between lstat and descent.
-    static func openDirectory(_ path: String) -> UnsafeMutablePointer<DIR>? {
-        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    // Open the scan root, then reject symlinks in every indexed component.
+    // An initial root can have system aliases (e.g. /var) above its boundary.
+    static func openDirectory(_ path: String, relativeTo root: String? = nil) -> UnsafeMutablePointer<DIR>? {
+        let options = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        var fd: Int32
+        if let root, path != root {
+            let prefix = root == "/" ? "/" : root + "/"
+            guard path.hasPrefix(prefix) else { errno = EINVAL; return nil }
+            fd = open(root, options)
+            guard fd >= 0 else { return nil }
+            for component in path.dropFirst(prefix.count).split(separator: "/") {
+                guard component != ".", component != ".." else { close(fd); errno = EINVAL; return nil }
+                let next = openat(fd, String(component), options)
+                let failure = errno
+                close(fd)
+                guard next >= 0 else { errno = failure; return nil }
+                fd = next
+            }
+        } else { fd = open(path, options) }
         guard fd >= 0 else { return nil }
         guard let directory = fdopendir(fd) else {
             let failure = errno
@@ -41,7 +57,7 @@ public struct Scanner: Sendable {
         defer { closedir(directory) }
         let rootID = store.append(name: rootName, parent: FileStore.noParent,
                                   size: 0, mtime: 0, isDir: true, volID: volID)
-        walk(path: rootName, parent: rootID, into: &store, volID: volID, openedDirectory: directory)
+        walk(path: rootName, root: rootName, parent: rootID, into: &store, volID: volID, openedDirectory: directory)
     }
 
     /// Recursively index the contents of an already-known directory `path` under
@@ -49,13 +65,16 @@ public struct Scanner: Sendable {
     /// Used by live reconcile to populate a newly-created subtree.
     @discardableResult
     func indexContents(of path: String, under parent: UInt32, into store: inout FileStore, volID: UInt32) -> Bool {
-        walk(path: path, parent: parent, into: &store, volID: volID)
+        guard store.rootID != FileStore.noParent else { return false }
+        return walk(path: path, root: store.name(of: store.rootID), parent: parent, into: &store, volID: volID)
     }
 
     @discardableResult
-    private func walk(path: String, parent: UInt32, into store: inout FileStore, volID: UInt32,
+    private func walk(path: String, root: String, parent: UInt32, into store: inout FileStore, volID: UInt32,
                       openedDirectory: UnsafeMutablePointer<DIR>? = nil) -> Bool {
-        guard let dir = openedDirectory ?? Self.openDirectory(path) else { store.markScanIncomplete(); return false }
+        guard let dir = openedDirectory ?? Self.openDirectory(path, relativeTo: root) else {
+            store.markScanIncomplete(); store.setSubtreeIncomplete(parent, true); return false
+        }
         defer { if openedDirectory == nil { closedir(dir) } }
 
         // First pass: collect names and detect whether this directory is a project
@@ -66,7 +85,7 @@ public struct Scanner: Sendable {
         while true {
             errno = 0
             guard let entp = readdir(dir) else {
-                if errno != 0 { store.markScanIncomplete(); return false }
+                if errno != 0 { store.markScanIncomplete(); store.setSubtreeIncomplete(parent, true); return false }
                 break
             }
             // Extract the null-terminated name from the fixed-size d_name tuple.
@@ -88,7 +107,9 @@ public struct Scanner: Sendable {
             if rules.shouldExclude(name: name, path: full, isHidden: isHidden, inProjectDir: inProjectDir) { continue }
 
             var st = stat()
-            guard lstat(full, &st) == 0 else { store.markScanIncomplete(); completed = false; continue }
+            guard fstatat(dirfd(dir), name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_size >= 0 else {
+                store.markScanIncomplete(); completed = false; continue
+            }
 
             // lstat reports S_IFLNK for symlinks, not S_IFDIR — so symlinked
             // directories won't be recursed into, preventing infinite loops.
@@ -97,14 +118,15 @@ public struct Scanner: Sendable {
             // by name/path in shouldExclude above).
             if !isDir && rules.shouldExcludeFile(name: name) { continue }
             let mtime = Int64(st.st_mtimespec.tv_sec)
-            let size = UInt64(max(0, st.st_size))
+            let size = UInt64(st.st_size)
 
             let id = store.append(name: name, parent: parent, size: size,
                                   mtime: mtime, isDir: isDir, volID: volID)
             if isDir {
-                if !walk(path: full, parent: id, into: &store, volID: volID) { completed = false }
+                if !walk(path: full, root: root, parent: id, into: &store, volID: volID) { completed = false }
             }
         }
+        store.setSubtreeIncomplete(parent, !completed)
         return completed
     }
 }

@@ -316,3 +316,99 @@ private final class StorageScanBudget: @unchecked Sendable {
     #expect(!store.isDir(of: current))
     #expect(store.childIDs(of: current).isEmpty)
 }
+
+@Test func storageReviewAncestorSymlinkReplacementDoesNotIndexExternalTarget() throws {
+    let directory = try safetyDirectory(), outside = try safetyDirectory()
+    let replaced = directory.appendingPathComponent("same"), nested = replaced.appendingPathComponent("nested")
+    defer {
+        try? FileManager.default.removeItem(at: directory)
+        try? FileManager.default.removeItem(at: outside)
+    }
+    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    try Data([1]).write(to: nested.appendingPathComponent("old.txt"))
+    let external = outside.appendingPathComponent("nested")
+    try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+    try Data([2]).write(to: external.appendingPathComponent("external.txt"))
+    var store = FileStore()
+    try Scanner(rules: ExcludeRules()).scan(rootPath: directory.path, into: &store, volID: 1)
+    try FileManager.default.removeItem(at: replaced)
+    try FileManager.default.createSymbolicLink(at: replaced, withDestinationURL: outside)
+    // O_NOFOLLOW on just "nested" does not reject the replaced "same" ancestor.
+    LiveMonitor.reconcile(directory: nested.path, in: &store, rules: ExcludeRules(), volID: 1)
+    #expect(!(0..<store.count).contains { store.isLive(UInt32($0)) && store.name(of: UInt32($0)) == "external.txt" })
+}
+
+@Test func storageReviewIncompleteNewSubtreeRetriesWithoutDuplicateChildren() throws {
+    let directory = try safetyDirectory(), added = directory.appendingPathComponent("new")
+    defer {
+        chmod(added.path, 0o700)
+        try? FileManager.default.removeItem(at: directory)
+    }
+    var store = FileStore()
+    try Scanner(rules: ExcludeRules()).scan(rootPath: directory.path, into: &store, volID: 1)
+    try FileManager.default.createDirectory(at: added, withIntermediateDirectories: true)
+    try Data([1]).write(to: added.appendingPathComponent("child.txt"))
+    #expect(chmod(added.path, 0) == 0)
+    #expect(LiveMonitor.reconcile(directory: directory.path, in: &store, rules: ExcludeRules(), volID: 1))
+    let subtree = try #require(store.childID(named: "new", under: store.rootID))
+    #expect(store.childIDs(of: subtree).isEmpty)
+    #expect(chmod(added.path, 0o700) == 0)
+    #expect(LiveMonitor.reconcile(directory: directory.path, in: &store, rules: ExcludeRules(), volID: 1))
+    #expect(store.childIDs(of: subtree).count == 1)
+    #expect(store.childID(named: "child.txt", under: subtree) != nil)
+    let count = store.count
+    #expect(!LiveMonitor.reconcile(directory: directory.path, in: &store, rules: ExcludeRules(), volID: 1))
+    #expect(store.count == count)
+}
+
+@Test func storageReviewDeepPartialSubtreeRetriesOnlyMissingChildren() throws {
+    let directory = try safetyDirectory(), added = directory.appendingPathComponent("new")
+    let blocked = added.appendingPathComponent("blocked")
+    defer {
+        chmod(blocked.path, 0o700)
+        try? FileManager.default.removeItem(at: directory)
+    }
+    var store = FileStore()
+    try Scanner(rules: ExcludeRules()).scan(rootPath: directory.path, into: &store, volID: 1)
+    try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+    try Data([1]).write(to: added.appendingPathComponent("present.txt"))
+    try Data([2]).write(to: blocked.appendingPathComponent("missing.txt"))
+    #expect(chmod(blocked.path, 0) == 0)
+    LiveMonitor.reconcile(directory: directory.path, in: &store, rules: ExcludeRules(), volID: 1)
+    let addedID = try #require(store.childID(named: "new", under: store.rootID))
+    let presentID = try #require(store.childID(named: "present.txt", under: addedID))
+    let blockedID = try #require(store.childID(named: "blocked", under: addedID))
+    // Retry state must remain writer-owned across background compaction adoption.
+    let packed = try store.storageSnapshot().compacted()
+    let adopted = store.adoptCompaction(packed, expectedRevision: packed.revision)
+    #expect(adopted)
+    #expect(chmod(blocked.path, 0o700) == 0)
+    #expect(LiveMonitor.reconcile(directory: directory.path, in: &store, rules: ExcludeRules(), volID: 1))
+    #expect(store.childID(named: "present.txt", under: addedID) == presentID)
+    #expect(store.childIDs(of: addedID).count == 2)
+    #expect(store.childID(named: "missing.txt", under: blockedID) != nil)
+}
+
+@Test func storageReviewCacheFIFOIsRejectedWithoutWaitingForWriter() throws {
+    let directory = try safetyDirectory(), fifo = directory.appendingPathComponent("index.idx")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    #expect(mkfifo(fifo.path, 0o600) == 0)
+    let finished = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+        _ = try? IndexCache.load(from: fifo)
+        finished.signal()
+    }
+    let completedBeforeWriter = finished.wait(timeout: .now() + .milliseconds(200)) == .success
+    if !completedBeforeWriter {
+        // Release the old blocking open for a bounded failing regression run.
+        var writer: Int32 = -1
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while writer < 0 && ContinuousClock.now < deadline {
+            writer = open(fifo.path, O_WRONLY | O_NONBLOCK)
+            if writer < 0 { usleep(1_000) }
+        }
+        if writer >= 0 { close(writer) }
+        #expect(finished.wait(timeout: .now() + .seconds(2)) == .success)
+    }
+    #expect(completedBeforeWriter)
+}

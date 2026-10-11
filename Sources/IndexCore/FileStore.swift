@@ -21,6 +21,7 @@ public struct FileStore: Sendable {
     private var deletedWords: [Int: UInt64] = [:]
     private var childrenByParent: [UInt32: [UInt32]] = [:]
     private var dirReconcileMtime: [UInt32: Int64] = [:]
+    private var incompleteSubtrees: Set<UInt32> = []
     public private(set) var rootID: UInt32 = .max
     public private(set) var deletedCount = 0
     public private(set) var revision: UInt64 = 0
@@ -46,6 +47,7 @@ public struct FileStore: Sendable {
         var copy = self
         copy.childrenByParent = [:]
         copy.dirReconcileMtime = [:]
+        copy.incompleteSubtrees = []
         return copy
     }
 
@@ -152,6 +154,7 @@ public struct FileStore: Sendable {
         return i >= baseCount || base!.value(8, i, as: UInt8.self) == 1
     }
     public mutating func markDeleted(_ id: UInt32) {
+        incompleteSubtrees.remove(id)
         if isLive(id) {
                 let i = Int(id)
             deletedWords[i >> 6, default: 0] |= UInt64(1) << (i & 63)
@@ -212,6 +215,18 @@ public struct FileStore: Sendable {
     /// session, so the first event always reconciles in full — no same-second miss.
     public func reconcileMtime(of id: UInt32) -> Int64? { dirReconcileMtime[id] }
     public mutating func setReconcileMtime(_ id: UInt32, _ nsec: Int64) { dirReconcileMtime[id] = nsec }
+    func subtreeIsIncomplete(_ id: UInt32) -> Bool { incompleteSubtrees.contains(id) }
+    mutating func setSubtreeIncomplete(_ id: UInt32, _ incomplete: Bool) {
+        guard incomplete else { incompleteSubtrees.remove(id); return }
+        // A later event for any ancestor must also retry the failed descendant.
+        var current = id
+        while isLive(current) {
+            incompleteSubtrees.insert(current)
+            let next = parent(of: current)
+            guard next != Self.noParent, next < current else { break }
+            current = next
+        }
+    }
 
     public func childIDs(of parent: UInt32) -> [UInt32] {
         guard let kids = childrenByParent[parent] else { return [] }
