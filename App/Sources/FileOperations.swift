@@ -253,6 +253,8 @@ private struct FileTreeSnapshot: Sendable, Equatable {
         let size: Int64
         let modified: Int64
         let modifiedNanos: Int64
+        let changed: Int64
+        let changedNanos: Int64
     }
     private var entries: [Entry] = []
 
@@ -272,7 +274,8 @@ private struct FileTreeSnapshot: Sendable, Equatable {
         let info = try Self.metadata(url)
         entries.append(Entry(path: Array(relative.utf8), device: info.st_dev, inode: info.st_ino,
                              mode: info.st_mode, size: info.st_size,
-                             modified: Int64(info.st_mtimespec.tv_sec), modifiedNanos: Int64(info.st_mtimespec.tv_nsec)))
+                             modified: Int64(info.st_mtimespec.tv_sec), modifiedNanos: Int64(info.st_mtimespec.tv_nsec),
+                             changed: Int64(info.st_ctimespec.tv_sec), changedNanos: Int64(info.st_ctimespec.tv_nsec)))
         guard info.st_mode & S_IFMT == S_IFDIR else { return }
         let children = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
             .sorted { $0.lastPathComponent.utf8.lexicographicallyPrecedes($1.lastPathComponent.utf8) }
