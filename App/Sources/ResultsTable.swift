@@ -11,18 +11,20 @@ struct ResultsTable: NSViewRepresentable {
     var onSelection: (([FileRecord]) -> Void)? = nil
     var onPreview: (([FileRecord]) -> Void)? = nil
     var selectedRecords: [FileRecord]? = nil
+    var query: Query? = nil
+    var folderTotals: FolderSnapshot? = nil
+    var sortKey: QueryEngine.SortKey? = nil
+    var ascending = true
+    var showIndexedTotals: Bool? = nil
+    var onIndexedTotalsVisibilityChanged: ((Bool) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
         let table = ResultsKeyTableView()
         table.onResultKey = context.coordinator.handleResultKey
-        for (key, title, width) in [("name","Name",260),("path","Path",380),("size","Size",90),("kind","Kind",130),("mtime","Date Modified",160)] {
-            let col = NSTableColumn(identifier: .init(key))
-            col.title = title; col.width = CGFloat(width)
-            col.sortDescriptorPrototype = NSSortDescriptor(key: key, ascending: true)
-            table.addTableColumn(col)
-        }
+        context.coordinator.table = table
+        context.coordinator.installColumns(in: table)
         table.dataSource = context.coordinator
         table.delegate = context.coordinator
         table.target = context.coordinator
@@ -67,6 +69,7 @@ struct ResultsTable: NSViewRepresentable {
         let scroll = NSScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
         context.coordinator.table = table
         return scroll
     }
@@ -80,15 +83,34 @@ struct ResultsTable: NSViewRepresentable {
         weak var table: NSTableView?
         weak var openWithMenu: NSMenu?
         weak var contextMenu: NSMenu?
+        weak var columnsMenu: NSMenu?
+        let columnDefaults: UserDefaults
+        var columnLayout: ResultsColumnLayout
+        var suppressColumnPersistence = false
+        var lastIndexedTotalsVisibility: Bool?
+        var highlightTask: Task<Void, Never>?
+        var highlightRequest = UUID()
+        var highlightPrepared = false
+        var highlights: [SelectionIdentity: RecordHighlights] = [:]
         private var contextRecords: [FileRecord] = []
         var suppressSelectionCallback = false
-        init(_ p: ResultsTable) { parent = p }
+        var suppressSortCallback = false
+        init(_ p: ResultsTable, columnDefaults: UserDefaults = .standard) {
+            parent = p
+            self.columnDefaults = columnDefaults
+            columnLayout = ResultsColumnLayout.load(from: columnDefaults)
+        }
+        deinit { highlightTask?.cancel() }
 
         func numberOfRows(in tableView: NSTableView) -> Int { parent.rows.count }
 
         func reload(_ next: ResultsTable) {
             let selected = next.selectedRecords ?? selectedRecords()
+            let updateHighlights = parent.query != next.query || !Self.sameRows(parent.rows, next.rows)
+            let updateTotalsVisibility = parent.showIndexedTotals != next.showIndexedTotals
             parent = next
+            if updateTotalsVisibility { applyIndexedTotalsOverride() }
+            applySortIndicators()
             suppressSelectionCallback = true
             defer { suppressSelectionCallback = false }
             table?.reloadData()
@@ -97,6 +119,7 @@ struct ResultsTable: NSViewRepresentable {
             // Rebuilds reuse IDs; every selected row must also keep its exact path bytes.
             if indexes.isEmpty { table?.deselectAll(nil) }
             else { table?.selectRowIndexes(indexes, byExtendingSelection: false) }
+            if updateHighlights || !highlightPrepared { prepareHighlights() }
         }
 
         // Report the user's row pick up to the model so the menu bar can act on it.
@@ -147,14 +170,21 @@ struct ResultsTable: NSViewRepresentable {
             // Name column carries the file-type icon; everything else is text-only.
             if key == "name" {
                 let cell = nameCell(t)
-                cell.textField?.stringValue = rec.name
+                applyText(rec.name, ranges: highlights[SelectionIdentity(rec)]?.name ?? [], to: cell.textField)
                 cell.imageView?.image = FileIcons.icon(ext: Self.ext(rec.name), isDir: rec.isDir)
                 return cell
             }
             let cell = textCell(t)
             switch key {
-            case "path": cell.textField?.stringValue = rec.path
-            case "size": cell.textField?.stringValue = rec.isDir ? "--" : Self.sizeText(rec.size)
+            // Row names, paths, dates, bytes and file counts come from FileRecord
+            // or the matching immutable indexed folder snapshot.
+            case "path": applyText(rec.path, ranges: highlights[SelectionIdentity(rec)]?.path ?? [], to: cell.textField)
+            case "size":
+                cell.textField?.stringValue = Self.sizeText(rec.size)
+            case "indexedSize":
+                let bytes = rec.isDir ? parent.folderTotals?.totals(for: rec)?.bytes : rec.size
+                cell.textField?.stringValue = bytes.map(Self.sizeText) ?? ""
+            case "fileCount": cell.textField?.stringValue = parent.folderTotals?.totals(for: rec)?.fileCount.formatted() ?? ""
             case "kind": cell.textField?.stringValue = FileIcons.kind(ext: Self.ext(rec.name), isDir: rec.isDir)
             case "mtime": cell.textField?.stringValue = Self.df.string(from: Date(timeIntervalSince1970: TimeInterval(rec.mtime)))
             default: break
@@ -214,6 +244,7 @@ struct ResultsTable: NSViewRepresentable {
         }
 
         func tableView(_ t: NSTableView, sortDescriptorsDidChange old: [NSSortDescriptor]) {
+            guard !suppressSortCallback else { return }
             guard let d = t.sortDescriptors.first, let k = d.key else { return }
             let key: QueryEngine.SortKey = ["name":.name,"path":.path,"size":.size,"kind":.kind,"mtime":.mtime][k] ?? .name
             parent.onSort(key, d.ascending)
@@ -249,6 +280,11 @@ struct ResultsTable: NSViewRepresentable {
         @objc func ctxGetInfo() { ResultActions.getInfo(clickedRecords()) }
 
         func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+            if menuItem.action == #selector(toggleColumn(_:)) {
+                guard let key = menuItem.representedObject as? String,
+                      let column = table?.tableColumns.first(where: { $0.identifier.rawValue == key }) else { return false }
+                return column.isHidden || (table?.tableColumns.filter({ !$0.isHidden }).count ?? 0) > 1
+            }
             guard !clickedRecords().isEmpty, !ResultActions.state.isBusy else { return false }
             if menuItem.action == #selector(ctxPasteFiles) { return ResultActions.canPasteFiles }
             return true
@@ -264,6 +300,7 @@ struct ResultsTable: NSViewRepresentable {
         // marked), then the pinned editor, then a "Choose Application…" picker — so
         // there's always something to open with. Chosen app rides on representedObject.
         func menuNeedsUpdate(_ menu: NSMenu) {
+            if menu === columnsMenu { updateColumnMenu(); return }
             if menu === contextMenu {
                 if let row = table?.clickedRow, parent.rows.indices.contains(row) {
                     contextRecords = table?.selectedRowIndexes.contains(row) == true ? selectedRecords() : [parent.rows[row]]
