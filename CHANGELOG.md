@@ -4,6 +4,17 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [Unreleased]
+
+### Added
+- Full Disk Access onboarding before the first scan, with settings, relaunch, and continue-without-access actions.
+- Opt-in network-volume indexing, background scans, offline cached search, and automatic reconnection using saved keychain credentials.
+
+### Fixed
+- Quitting permission onboarding no longer creates an empty cache that bypasses onboarding next launch.
+- Network mount availability no longer invalidates the cached index at launch.
+- Outdated network scans cannot reintroduce files excluded by changed settings, and local live indexing does not traverse network trees.
+
 ## [0.3.0] - 2026-06-24
 
 ### Added

@@ -2,6 +2,15 @@ import Foundation
 import CoreServices
 import IndexCore
 
+struct NetworkShareStatus: Sendable, Equatable, Identifiable {
+    let share: NetworkShare
+    let mountPath: String?
+    let scanning: Bool
+    let count: Int
+    var id: String { share.id }
+    var isOffline: Bool { mountPath == nil }
+}
+
 // Serializes all store access. Mutations (scan, reconcile) and reads (search)
 // never race because they run on this actor. The full-disk scan is COOPERATIVE:
 // it yields every few thousand files so queued reads (search, totalCount) and
@@ -28,6 +37,19 @@ actor IndexActor {
     private var lastEventID: UInt64 = UInt64(kFSEventStreamEventIdSinceNow)
     private var onLiveChange: (@Sendable () -> Void)?
     private var onProgress: (@Sendable (Int) -> Void)?
+    private var onShareStatus: (@Sendable ([NetworkShareStatus]) -> Void)?
+
+    // Network shares seen mounted at the last check, and those with a scan in
+    // flight. A share is (re)scanned on every offline→online transition, which
+    // includes launch and a full rebuild, so a reconnect never serves stale entries
+    // for long while an offline share keeps its last-known entries searchable.
+    private var mountedShares: Set<String> = []
+    private var scanningShares: [String: Int] = [:]
+    private var shareCounts: [String: Int] = [:]
+    private var mountingShares: Set<String> = []
+    private var shareScanIDs: [String: UUID] = [:]
+    private var rebuildID: UUID?
+    private var preparedCache: (FileStore, UInt64, UInt64)?
 
     init() {
         if let data = UserDefaults.standard.data(forKey: "excludeRules"),
@@ -44,6 +66,16 @@ actor IndexActor {
             .appendingPathComponent("Everything-Mac", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base.appendingPathComponent("index.idx")
+    }
+
+    // Validate on the actor, and keep the loaded store for startUp so a large cache
+    // is neither decoded on the UI thread nor decoded twice during onboarding.
+    func hasUsableCache() -> Bool {
+        guard let cache = try? IndexCache.load(from: Self.cacheURL()),
+              cache.0.count > 0, cache.2 == cacheFingerprint(),
+              !Self.isContaminated(cache.0) else { return false }
+        preparedCache = cache
+        return true
     }
 
     func search(_ text: String, matchPath: Bool, caseInsensitive: Bool = true, wholeWord: Bool = false,
@@ -72,6 +104,10 @@ actor IndexActor {
     func currentRules() -> ExcludeRules { rules }
 
     func setRules(_ r: ExcludeRules) {
+        if rules != r {
+            invalidateShareScans()
+            preparedCache = nil
+        }
         rules = r
         liveRules = effectiveRules()
         if let data = try? JSONEncoder().encode(r) {
@@ -85,7 +121,7 @@ actor IndexActor {
     // every mounted volume exactly once — EXCEPT the Data volume is also visible
     // at /System/Volumes/Data (and siblings), which would duplicate every user
     // file. Exclude those firmlink back-doors. User rules are merged in.
-    private func effectiveRules() -> ExcludeRules {
+    private func effectiveRules(excludingNetworkMounts: Bool = true) -> ExcludeRules {
         let firmlinkBackDoors = [
             "/System/Volumes/Data",
             "/System/Volumes/Preboot",
@@ -102,70 +138,182 @@ actor IndexActor {
         // Also skip network (non-local) mounts. Crawling an SMB/NFS share does one
         // network round-trip per lstat and an smbfs readdir blocks in uninterruptible
         // I/O — a single mounted share with millions of files hangs the whole scan.
-        effective.pathPrefixes += firmlinkBackDoors + Self.nonLocalMountPaths()
+        effective.pathPrefixes += firmlinkBackDoors
+        if excludingNetworkMounts { effective.pathPrefixes += Self.nonLocalMountPaths() }
         return effective
     }
 
-    // Mount points of non-local (network) filesystems — SMB/NFS/AFP/WebDAV shares.
-    // getmntinfo with MNT_NOWAIT reads the kernel's cached mount table and never
-    // itself touches the network (MNT_WAIT would refresh stats and could block on a
-    // stalled mount). MNT_LOCAL is set only for filesystems stored on local media.
-    static func nonLocalMountPaths() -> [String] {
-        var mntbuf: UnsafeMutablePointer<statfs>? = nil
-        let count = getmntinfo(&mntbuf, MNT_NOWAIT)
-        guard count > 0, let mntbuf else { return [] }
-        var out: [String] = []
-        for i in 0..<Int(count) {
-            var fs = mntbuf[i]
-            if (fs.f_flags & UInt32(MNT_LOCAL)) != 0 { continue } // local → index it
-            let path = withUnsafePointer(to: &fs.f_mntonname) {
-                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
-            }
-            out.append(path)
-        }
-        return out
+    // Mount availability changes what can be scanned, not the user's exclusions.
+    // An offline share must not invalidate the cache holding its last-known files.
+    private func cacheFingerprint() -> UInt64 {
+        effectiveRules(excludingNetworkMounts: false).fingerprint()
     }
+
+    private func invalidateShareScans() {
+        shareScanIDs.removeAll()
+        scanningShares.removeAll()
+        mountedShares.removeAll()
+    }
+
+    // Mount points of non-local filesystems — network shares and automounter stubs.
+    static func nonLocalMountPaths() -> [String] { MountTable.nonLocalMounts().map(\.path) }
 
     // Rebuild the whole index from "/". The walk runs OFF the actor on a pool of
     // worker threads (ParallelScanner), so the actor stays free to serve searches
     // against the existing index while the new one builds — no scan↔search
     // contention, all cores busy. The finished store is swapped in atomically.
     func rescanAll() async {
+        let id = UUID()
+        rebuildID = id
+        invalidateShareScans()
         let effective = effectiveRules()
         let prog = onProgress
         let newStore = await Task.detached(priority: .userInitiated) {
             ParallelScanner.scanWholeDisk(rules: effective) { count in prog?(count) }
         }.value
+        guard rebuildID == id else { return }
         store = newStore
+        rebuildID = nil
         cachedQueryKey = nil
         onProgress?(store.count)
+        mountedShares = []
+        shareCounts = [:]
+        checkNetworkShares()
+        reconnectShares()
     }
 
     // Launch path: load the cache if present (FSEvents replays any changes made
     // while we were closed), otherwise do a full scan and save a fresh cache.
     // Then start the live monitor from the saved event id.
     func startUp(onLiveChange: @escaping @Sendable () -> Void,
-                 onProgress: @escaping @Sendable (Int) -> Void) async {
+                 onProgress: @escaping @Sendable (Int) -> Void,
+                 onShareStatus: @escaping @Sendable ([NetworkShareStatus]) -> Void) async {
         self.onLiveChange = onLiveChange
         self.onProgress = onProgress
+        self.onShareStatus = onShareStatus
         liveRules = effectiveRules()   // before the monitor starts firing live reconciles
         let url = Self.cacheURL()
-        let fingerprint = effectiveRules().fingerprint()
+        let fingerprint = cacheFingerprint()
         // Use the cache only if it was built with the SAME exclusion rules now in
         // effect. Otherwise (e.g. an upgrade that turned dev-folder skipping on, or a
         // changed exclude list) the cached index disagrees with the active rules and
         // would keep serving folders that should now be hidden — rebuild instead.
-        if let (loaded, evid, savedFingerprint) = try? IndexCache.load(from: url),
+        let cache = preparedCache ?? (try? IndexCache.load(from: url))
+        preparedCache = nil
+        if let (loaded, evid, savedFingerprint) = cache,
            loaded.count > 0, savedFingerprint == fingerprint,
            !Self.isContaminated(loaded) {
             store = loaded
             lastEventID = evid
+            for share in rules.networkShares { shareCounts[share.source] = store.liveCount(volID: share.volID) }
+            checkNetworkShares()
+            reconnectShares()
         } else {
             await rescanAll()
             lastEventID = FSEventsGetCurrentEventId()
             try? IndexCache.save(store, to: url, lastEventID: lastEventID, rulesFingerprint: fingerprint)
         }
         startMonitor()
+    }
+
+    // MARK: - Network shares
+
+    // Compare the mount table with the last check and (re)scan any configured share
+    // that just became reachable. Cheap (no network I/O), so callers run it on a
+    // timer and on every /Volumes change.
+    func checkNetworkShares() {
+        guard rebuildID == nil else { publishShareStatus(); return }
+        let mounts = MountTable.networkMounts()
+        var nowMounted: Set<String> = []
+        for share in rules.networkShares {
+            guard let mount = mounts.first(where: { $0.source == share.source }) else { continue }
+            nowMounted.insert(share.source)
+            if !mountedShares.contains(share.source) && scanningShares[share.source] == nil {
+                scanShare(share, at: mount.path)
+            }
+        }
+        mountedShares = nowMounted
+        publishShareStatus()
+    }
+
+    // Mount every configured share that is currently unreachable. Called on launch,
+    // on wake and from Settings — never on the periodic check, which would fight a
+    // user who just ejected the share on purpose.
+    func reconnectShares() {
+        let mounted = Set(MountTable.networkMounts().map(\.source))
+        for share in rules.networkShares where !mounted.contains(share.source) {
+            guard let url = share.url, !mountingShares.contains(share.source) else { continue }
+            mountingShares.insert(share.source)
+            Task {
+                let ok = await Task.detached(priority: .utility) { NetworkMounter.mount(url) }.value
+                self.finishMount(share.source, mounted: ok)
+            }
+        }
+    }
+
+    private func finishMount(_ source: String, mounted: Bool) {
+        mountingShares.remove(source)
+        if mounted { checkNetworkShares() }
+    }
+
+    private func scanShare(_ share: NetworkShare, at mountPath: String) {
+        let scanID = UUID()
+        shareScanIDs[share.source] = scanID
+        scanningShares[share.source] = 0
+        let userRules = rules
+        let volID = share.volID
+        Task {
+            let sub = await Task.detached(priority: .utility) {
+                ParallelScanner.scan(root: mountPath, rules: userRules, volID: volID, workers: 4) { count in
+                    Task { await self.shareScanProgress(share.source, scanID: scanID, count: count) }
+                }
+            }.value
+            self.finishShareScan(share, scanID: scanID, at: mountPath, with: sub)
+        }
+    }
+
+    private func shareScanProgress(_ source: String, scanID: UUID, count: Int) {
+        guard shareScanIDs[source] == scanID else { return }
+        scanningShares[source] = count
+        publishShareStatus()
+    }
+
+    // A share that vanished mid-scan yields a truncated tree: keep the previous
+    // entries instead. A share removed from the rules while scanning is dropped.
+    private func finishShareScan(_ share: NetworkShare, scanID: UUID, at mountPath: String, with sub: FileStore) {
+        // A rebuild or rule change invalidates the old scan. Its completion and
+        // progress must never overwrite a newer scan or reintroduce excluded files.
+        guard shareScanIDs[share.source] == scanID else { return }
+        shareScanIDs[share.source] = nil
+        scanningShares[share.source] = nil
+        defer { publishShareStatus() }
+        guard rules.networkShares.contains(share),
+              MountTable.mountPath(forSource: share.source) == mountPath else {
+            mountedShares.remove(share.source)
+            return
+        }
+        let parentPath = (mountPath as NSString).deletingLastPathComponent
+        guard let parent = store.idForDirPath(parentPath) else {
+            mountedShares.remove(share.source)
+            return
+        }
+        store.markDeleted(volID: share.volID)
+        store.merge(sub, asChildOf: parent, volID: share.volID)
+        shareCounts[share.source] = sub.count
+        cachedQueryKey = nil
+        onLiveChange?()
+        flush()
+    }
+
+    private func publishShareStatus() {
+        let mounts = MountTable.networkMounts()
+        let status = rules.networkShares.map { share in
+            NetworkShareStatus(share: share,
+                               mountPath: mounts.first { $0.source == share.source }?.path,
+                               scanning: scanningShares[share.source] != nil,
+                               count: scanningShares[share.source] ?? shareCounts[share.source] ?? 0)
+        }
+        onShareStatus?(status)
     }
 
     // A clean scan excludes the Data volume's firmlink back-door, so a healthy index
@@ -230,7 +378,10 @@ actor IndexActor {
 
     func enqueueChanges(_ changes: [LiveMonitor.FSChange]) {
         for c in changes {
-            let p = LiveMonitor.canonicalEventPath(c.path)
+            // FSEvents delivers directories with a trailing slash; the index and the
+            // volume-root checks work with the bare path.
+            let raw = c.path.count > 1 && c.path.hasSuffix("/") ? String(c.path.dropLast()) : c.path
+            let p = LiveMonitor.canonicalEventPath(raw)
             pendingDirs.insert(p)
             if c.mustScanSubtree { pendingDeep.insert(p) }
         }
@@ -258,6 +409,12 @@ actor IndexActor {
             let deep = pendingDeep
             pendingDirs.removeAll(keepingCapacity: true)
             pendingDeep.removeAll(keepingCapacity: true)
+            // A mount or unmount shows up as a /Volumes change. Refresh the live
+            // exclusions first so a freshly mounted share is never crawled inline.
+            if dirs.contains("/Volumes") {
+                liveRules = effectiveRules()
+                checkNetworkShares()
+            }
             var changed = false
             for d in dirs {
                 // A MustScanSubDirs (deep) event resyncs the whole live subtree under `d`;
@@ -323,8 +480,11 @@ actor IndexActor {
     // Persist the current store + a fresh event id so the next launch can replay
     // only the changes that happened after this point.
     func flush() {
+        // Quitting permission onboarding must not create an empty cache that
+        // masquerades as a completed first scan on the next launch.
+        guard store.count > 0 else { return }
         lastEventID = FSEventsGetCurrentEventId()
         try? IndexCache.save(store, to: Self.cacheURL(), lastEventID: lastEventID,
-                             rulesFingerprint: effectiveRules().fingerprint())
+                             rulesFingerprint: cacheFingerprint())
     }
 }

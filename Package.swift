@@ -2,9 +2,8 @@
 import PackageDescription
 import Foundation
 
-// The test target is wired in only when the Tests directory is present. Tests
-// aren't part of the published sources, so a fresh clone builds without them;
-// drop the Tests/IndexCoreTests folder back in and `swift test` picks it up.
+// Wire in the test target when regression tests are present. Source distributions
+// without Tests/IndexCoreTests still build the library without a test target.
 var targets: [Target] = [
     .target(name: "IndexCore"),
 ]

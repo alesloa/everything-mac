@@ -3,12 +3,19 @@ import IndexCore
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
-    @State private var fdaGranted = true
     @FocusState private var searchFocused: Bool
 
     var body: some View {
+        if model.awaitingFullDiskAccess {
+            FullDiskAccessView()
+        } else {
+            searchUI
+        }
+    }
+
+    private var searchUI: some View {
         VStack(spacing: 0) {
-            if !fdaGranted {
+            if !model.fdaGranted {
                 HStack {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     Text("Grant Full Disk Access to index everything.")
@@ -26,13 +33,11 @@ struct ContentView: View {
                          onSelect: { model.selectedID = $0?.id },
                          onActivate: { ResultActions.open($0) })
             Divider()
-            StatusBar(total: model.total, shown: model.results.count, scanning: model.scanning)
+            StatusBar(total: model.total, shown: model.results.count, scanning: model.scanning,
+                      shares: model.shares)
         }
         .background(.regularMaterial)
-        .onAppear {
-            fdaGranted = FullDiskAccess.isGranted()
-            searchFocused = true
-        }
+        .onAppear { searchFocused = true }
         .onChange(of: model.focusSearchSignal) { searchFocused = true }
     }
 }
