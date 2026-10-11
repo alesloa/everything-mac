@@ -2,6 +2,7 @@
 // query. Keep this separate from ranking: scores always change with the query.
 extension Query {
     func narrows(_ previous: Query) -> Bool {
+        guard !usesAdvancedEngine, !previous.usesAdvancedEngine else { return false }
         guard matchPath == previous.matchPath,
               caseInsensitive == previous.caseInsensitive,
               wholeWord == previous.wholeWord, fuzzy == previous.fuzzy else { return false }

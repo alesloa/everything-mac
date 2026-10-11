@@ -33,6 +33,7 @@ public final class SearchIndex: @unchecked Sendable {
 
     public func search(_ query: Query, sort: QueryEngine.SortKey = .relevance,
                        ascending: Bool = true, limit: Int = 5000) async -> [FileRecord] {
+        let query = query.refreshingRelativeDates()
         let snapshot = lock.withLock { current }
         let cancellation = SearchCancellation()
         return await withTaskCancellationHandler {
