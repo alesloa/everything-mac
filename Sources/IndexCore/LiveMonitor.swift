@@ -64,7 +64,8 @@ public final class LiveMonitor: @unchecked Sendable {
     @discardableResult
     public static func reconcile(directory: String, in store: inout FileStore,
                                  rules: ExcludeRules, volID: UInt32,
-                                 newlyIndexedDirs: inout Set<String>) -> Bool {
+                                 newlyIndexedDirs: inout Set<String>,
+                                 observe: ((ReconcileObservation) -> Void)? = nil) -> Bool {
         guard let dirID = store.idForDirPath(directory) else { return false }
         // Grafted network trees are refreshed by their own background scanner.
         // Reject them before stat/opendir can stall the actor on remote I/O.
@@ -94,10 +95,14 @@ public final class LiveMonitor: @unchecked Sendable {
             // a later successful listing can retry without a structural change.
             let failure = errno
             guard failure == ENOENT || failure == ENOTDIR || failure == ELOOP else {
+                observe?(.failed(directory, error: failure))
                 store.setSubtreeIncomplete(dirID, true); return false
             }
             var changed = false
-            for id in existing { store.markSubtreeDeleted(id); changed = true }
+            for id in existing {
+                observe?(.removed(store.path(of: id)))
+                store.markSubtreeDeleted(id); changed = true
+            }
             return changed
         }
         defer { closedir(dir) }
@@ -116,7 +121,10 @@ public final class LiveMonitor: @unchecked Sendable {
             errno = 0
             guard let e = readdir(dir) else {
                 // Never diff away entries using a failed/partial directory read.
-                if errno != 0 { store.setSubtreeIncomplete(dirID, true); return false }
+                if errno != 0 {
+                    observe?(.failed(directory, error: errno))
+                    store.setSubtreeIncomplete(dirID, true); return false
+                }
                 break
             }
             let name = withUnsafePointer(to: e.pointee.d_name) {
@@ -141,7 +149,12 @@ public final class LiveMonitor: @unchecked Sendable {
             // Check before lstat: even stat'ing a stalled share can block.
             if foreignNames.contains(key) || nonLocalMounts.contains(RawFileName(full)) { onDisk.insert(key); continue }
             var st = stat()
-            guard fstatat(dirfd(dir), name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_size >= 0 else {
+            guard fstatat(dirfd(dir), name, &st, AT_SYMLINK_NOFOLLOW) == 0 else {
+                observe?(.failed(full, error: errno))
+                onDisk.insert(key); completed = false; continue
+            }
+            guard st.st_size >= 0 else {
+                observe?(.invalidSize(full))
                 onDisk.insert(key); completed = false; continue
             }
             let isDir = (st.st_mode & S_IFMT) == S_IFDIR
@@ -149,11 +162,18 @@ public final class LiveMonitor: @unchecked Sendable {
             onDisk.insert(key)
             if let prior = existingByName[key] {
                 if prior.allSatisfy({ store.isDir(of: $0) == isDir }) {
+                    // Observe metadata already read for this structural listing.
+                    // The content-only mtime gate above stays unchanged.
+                    if observe != nil, let id = prior.first,
+                       store.size(of: id) != UInt64(st.st_size) || store.mtime(of: id) != Int64(st.st_mtimespec.tv_sec) {
+                        observe?(.metadata(full, size: UInt64(st.st_size), mtime: Int64(st.st_mtimespec.tv_sec),
+                                           priorSize: store.size(of: id), priorMtime: store.mtime(of: id)))
+                    }
                     if isDir, prior.contains(where: { store.subtreeIsIncomplete($0) }) {
                         // Retry only known failed subtrees. Diffing existing children
                         // avoids appending duplicates after a partially successful walk.
                         if reconcile(directory: full, in: &store, rules: rules, volID: volID,
-                                     newlyIndexedDirs: &newlyIndexedDirs) { changed = true }
+                                     newlyIndexedDirs: &newlyIndexedDirs, observe: observe) { changed = true }
                         if prior.contains(where: { store.subtreeIsIncomplete($0) }) { completed = false }
                     }
                     continue
@@ -161,11 +181,15 @@ public final class LiveMonitor: @unchecked Sendable {
                 // A same-name replacement can change file ↔ directory/symlink.
                 // Replace its stable slot and tombstone old descendants before
                 // adding the new type; content-only changes still do no work.
-                for id in prior { store.markSubtreeDeleted(id) }
+                for id in prior {
+                    observe?(.removed(store.path(of: id)))
+                    store.markSubtreeDeleted(id)
+                }
                 changed = true
             }
             let newID = store.append(name: name, parent: dirID, size: UInt64(st.st_size),
                                      mtime: Int64(st.st_mtimespec.tv_sec), isDir: isDir, volID: volID)
+            observe?(.added(full))
             changed = true
             if isDir {
                 if Scanner(rules: rules).indexContents(of: full, under: newID, into: &store, volID: volID) {
@@ -176,6 +200,7 @@ public final class LiveMonitor: @unchecked Sendable {
         for id in existing where !onDisk.contains(RawFileName(store.name(of: id))) {
             // Deleting a directory must tombstone its whole subtree, not just the
             // dir entry, or descendants linger as live ghost results.
+            observe?(.removed(store.path(of: id)))
             store.markSubtreeDeleted(id)
             changed = true
         }
@@ -190,9 +215,11 @@ public final class LiveMonitor: @unchecked Sendable {
     // reconciles): reconcile a single directory level.
     @discardableResult
     public static func reconcile(directory: String, in store: inout FileStore,
-                                 rules: ExcludeRules, volID: UInt32) -> Bool {
+                                 rules: ExcludeRules, volID: UInt32,
+                                 observe: ((ReconcileObservation) -> Void)? = nil) -> Bool {
         var ignored = Set<String>()
-        return reconcile(directory: directory, in: &store, rules: rules, volID: volID, newlyIndexedDirs: &ignored)
+        return reconcile(directory: directory, in: &store, rules: rules, volID: volID,
+                         newlyIndexedDirs: &ignored, observe: observe)
     }
 
     // Reconcile a single directory level. When the caller is descending a subtree — the
@@ -207,9 +234,10 @@ public final class LiveMonitor: @unchecked Sendable {
     public static func reconcileLevel(directory: String, in store: inout FileStore,
                                       rules: ExcludeRules, volID: UInt32, descend: Bool,
                                       newlyIndexedDirs: inout Set<String>,
-                                      pushChildDirsTo stack: inout [String]) -> Bool {
+                                      pushChildDirsTo stack: inout [String],
+                                      observe: ((ReconcileObservation) -> Void)? = nil) -> Bool {
         let changed = reconcile(directory: directory, in: &store, rules: rules, volID: volID,
-                                newlyIndexedDirs: &newlyIndexedDirs)
+                                newlyIndexedDirs: &newlyIndexedDirs, observe: observe)
         guard descend, let dirID = store.idForDirPath(directory) else { return changed }
         // Snapshot of live child dirs after reconcile (includes any just appended).
         for childID in store.childIDs(of: dirID) where store.isDir(of: childID) && store.volID(of: childID) == volID {
