@@ -3,6 +3,8 @@ import SwiftUI
 struct SearchField: View {
     @Binding var text: String
     @Binding var matchPath: Bool
+    @Binding var fuzzy: Bool
+    var wholeWord: Bool
     var focused: FocusState<Bool>.Binding
     var onChange: () -> Void
     var body: some View {
@@ -14,6 +16,11 @@ struct SearchField: View {
                 .onChange(of: text) { onChange() }
             Toggle("Match path", isOn: $matchPath).toggleStyle(.switch)
                 .onChange(of: matchPath) { onChange() }
+            // Source: the owner's request for fuzzy file search; the switch reflects
+            // the persisted AppModel search option, never inferred file metadata.
+            Toggle("Fuzzy", isOn: $fuzzy).toggleStyle(.switch)
+                .disabled(wholeWord)
+                .onChange(of: fuzzy) { onChange() }
         }
         .padding(8)
     }

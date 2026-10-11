@@ -26,7 +26,8 @@ struct ContentView: View {
                 .background(.yellow.opacity(0.2))
                 Divider()
             }
-            SearchField(text: $model.query, matchPath: $model.matchPath, focused: $searchFocused) { model.queryChanged() }
+            SearchField(text: $model.query, matchPath: $model.matchPath, fuzzy: $model.fuzzy,
+                        wholeWord: model.wholeWord, focused: $searchFocused) { model.queryChanged() }
             Divider()
             ResultsTable(rows: model.results,
                          onSort: { k, a in model.setSort(k, ascending: a) },

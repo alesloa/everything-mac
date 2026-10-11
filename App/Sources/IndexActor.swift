@@ -11,14 +11,16 @@ struct NetworkShareStatus: Sendable, Equatable, Identifiable {
     var isOffline: Bool { mountPath == nil }
 }
 
-// Serializes all store access. Mutations (scan, reconcile) and reads (search)
-// never race because they run on this actor. The full-disk scan is COOPERATIVE:
-// it yields every few thousand files so queued reads (search, totalCount) and
-// progress callbacks interleave — the UI stays responsive and results stream in
-// as the index builds instead of the actor blocking for the whole scan.
+// Owns filesystem work and mutations. Searches read immutable snapshots through
+// a separate service, so even a stalled directory listing or cache write cannot
+// queue ahead of a query. Publish only after a coherent batch of changes.
 actor IndexActor {
     private var store = FileStore()
-    private let engine = QueryEngine()
+    nonisolated let searchIndex = SearchIndex()
+    private let cacheWriter = IndexCacheWriter()
+    private var cacheRevision: UInt64 = 0
+    private var storeGeneration: UInt64 = 0
+    private var storeFingerprint: UInt64?
     private var rules = ExcludeRules.defaults
     // Rules the LIVE path reconciles with — the user rules plus the firmlink back-door /
     // network-mount exclusions the scan applies via effectiveRules(). Without these, a
@@ -26,12 +28,6 @@ actor IndexActor {
     // firmlink alias) would index it as a SECOND copy of a file already held at its
     // canonical "/…" path — the duplicate-folder bug. Refreshed whenever rules change.
     private var liveRules = ExcludeRules.defaults
-
-    // Matched ids for the last query (text + matchPath), so a sort-only change
-    // re-sorts these instead of re-scanning millions of records. Invalidated
-    // whenever the store mutates (rescan / live reconcile).
-    private var cachedQueryKey: String?
-    private var cachedIDs: [UInt32] = []
 
     private var monitor: LiveMonitor?
     private var lastEventID: UInt64 = UInt64(kFSEventStreamEventIdSinceNow)
@@ -58,7 +54,7 @@ actor IndexActor {
         }
     }
 
-    var totalCount: Int { store.count }
+    nonisolated var totalCount: Int { searchIndex.count }
 
     // ~/Library/Application Support/Everything-Mac/index.idx
     static func cacheURL() -> URL {
@@ -78,28 +74,18 @@ actor IndexActor {
         return true
     }
 
-    func search(_ text: String, matchPath: Bool, caseInsensitive: Bool = true, wholeWord: Bool = false,
-                sort: QueryEngine.SortKey, ascending: Bool, limit: Int = 5000) -> [FileRecord] {
-        // Re-scan only when the query (not the sort) changed. The key folds in every
-        // flag that changes which ids match — matchPath, case sensitivity, whole-word —
-        // so flipping any of them invalidates the cache. engine.search already excludes
-        // tombstoned ids, so no separate isLive filter pass is needed.
-        let key = (matchPath ? "P" : "N") + (caseInsensitive ? "i" : "s") + (wholeWord ? "w" : "x") + "\u{1}" + text
-        if key != cachedQueryKey {
-            cachedIDs = engine.search(Query(text: text, matchPath: matchPath,
-                                            caseInsensitive: caseInsensitive, wholeWord: wholeWord), in: store)
-            cachedQueryKey = key
-        }
-        let sorted = engine.sortedPrefix(cachedIDs, by: sort, ascending: ascending, limit: max(1, limit), in: store)
-        return sorted.map { id in
-            FileRecord(id: id, name: store.name(of: id), path: store.path(of: id),
-                       parent: store.parent(of: id),
-                       size: store.size(of: id), mtime: store.mtime(of: id),
-                       isDir: store.isDir(of: id), volID: store.volID(of: id))
-        }
+    nonisolated func search(_ text: String, matchPath: Bool, caseInsensitive: Bool = true,
+                            wholeWord: Bool = false, fuzzy: Bool = false,
+                            sort: QueryEngine.SortKey, ascending: Bool, limit: Int = 5000) async -> [FileRecord] {
+        await searchIndex.search(Query(text: text, matchPath: matchPath, caseInsensitive: caseInsensitive,
+                                       wholeWord: wholeWord, fuzzy: fuzzy),
+                                 sort: sort, ascending: ascending, limit: limit)
     }
 
-    func path(of id: UInt32) -> String { store.path(of: id) }
+    private func publishStore() {
+        searchIndex.publish(store)
+        onLiveChange?()
+    }
 
     func currentRules() -> ExcludeRules { rules }
 
@@ -159,13 +145,15 @@ actor IndexActor {
     static func nonLocalMountPaths() -> [String] { MountTable.nonLocalMounts().map(\.path) }
 
     // Rebuild the whole index from "/". The walk runs OFF the actor on a pool of
-    // worker threads (ParallelScanner), so the actor stays free to serve searches
-    // against the existing index while the new one builds — no scan↔search
-    // contention, all cores busy. The finished store is swapped in atomically.
+    // worker threads (ParallelScanner). Searches keep using the existing snapshot
+    // while the replacement builds; publish the finished store atomically.
     func rescanAll() async {
         let id = UUID()
         rebuildID = id
+        replayCheckpointBlocked = false
         invalidateShareScans()
+        let scanEventID = FSEventsGetCurrentEventId()
+        let fingerprint = cacheFingerprint()
         let effective = effectiveRules()
         let prog = onProgress
         let newStore = await Task.detached(priority: .userInitiated) {
@@ -174,7 +162,11 @@ actor IndexActor {
         guard rebuildID == id else { return }
         store = newStore
         rebuildID = nil
-        cachedQueryKey = nil
+        storeGeneration &+= 1
+        lastEventID = scanEventID
+        storeFingerprint = fingerprint
+        publishStore()
+        enqueueChanges([])
         onProgress?(store.count)
         mountedShares = []
         shareCounts = [:]
@@ -205,13 +197,14 @@ actor IndexActor {
            !Self.isContaminated(loaded) {
             store = loaded
             lastEventID = evid
+            storeFingerprint = savedFingerprint
+            publishStore()
             for share in rules.networkShares { shareCounts[share.source] = store.liveCount(volID: share.volID) }
             checkNetworkShares()
             reconnectShares()
         } else {
             await rescanAll()
-            lastEventID = FSEventsGetCurrentEventId()
-            try? IndexCache.save(store, to: url, lastEventID: lastEventID, rulesFingerprint: fingerprint)
+            await flush()
         }
         startMonitor()
     }
@@ -300,9 +293,8 @@ actor IndexActor {
         store.markDeleted(volID: share.volID)
         store.merge(sub, asChildOf: parent, volID: share.volID)
         shareCounts[share.source] = sub.count
-        cachedQueryKey = nil
-        onLiveChange?()
-        flush()
+        publishStore()
+        Task { await flush() }
     }
 
     private func publishShareStatus() {
@@ -362,31 +354,31 @@ actor IndexActor {
         return paths
     }
 
-    // FSEvents delivery → coalesced reconcile. Watching the whole Data volume delivers a
-    // FIREHOSE of change notifications during normal use (browser caches, app state, logs
-    // — hundreds per second under load). Reconciling once per delivery hammered this
-    // actor so relentlessly that the UI's own search/sort calls (which share the actor)
-    // never got a turn — the window looked frozen even though typing still worked. So
-    // instead of reconciling inline, accumulate the changed directories and process them
-    // in one deduped, throttled drain (≈twice a second), yielding mid-drain so a queued
-    // search interleaves. Each reported path IS the directory that changed; firmlink
-    // Data paths are mapped back to canonical so they resolve against the index.
+    // Coalesce the FSEvents firehose into directory batches. The mutable writer
+    // remains serial; searches bypass it and use the last published snapshot.
+    // Canonicalize Data-volume aliases before resolving directories in the store.
     private var pendingDirs: Set<String> = []
     private var pendingDeep: Set<String> = []
+    private var pendingEventID: UInt64 = 0
+    private var replayCheckpointBlocked = false
     private var drainScheduled = false
     private var draining = false
 
     func enqueueChanges(_ changes: [LiveMonitor.FSChange]) {
         for c in changes {
+            pendingEventID = max(pendingEventID, c.eventID)
             // FSEvents delivers directories with a trailing slash; the index and the
             // volume-root checks work with the bare path.
             let raw = c.path.count > 1 && c.path.hasSuffix("/") ? String(c.path.dropLast()) : c.path
             let p = LiveMonitor.canonicalEventPath(raw)
             pendingDirs.insert(p)
             if c.mustScanSubtree { pendingDeep.insert(p) }
+            // A volume-wide overflow is only reconciled shallowly. Keep replaying
+            // from the previous safe checkpoint until a full rebuild covers it.
+            if c.mustScanSubtree && Self.isVolumeRoot(p) { replayCheckpointBlocked = true }
         }
         // A drain is already pending or running — it will sweep up what we just added.
-        guard !drainScheduled, !draining else { return }
+        guard rebuildID == nil, !drainScheduled, !draining else { return }
         drainScheduled = true
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 500_000_000) // coalesce a 0.5s burst
@@ -396,17 +388,23 @@ actor IndexActor {
 
     private func drainChanges() async {
         drainScheduled = false
-        guard !draining else { return }
+        guard rebuildID == nil, !draining else { return }
         draining = true
-        defer { draining = false }
+        defer {
+            draining = false
+            if !pendingDirs.isEmpty { enqueueChanges([]) }
+        }
         var processed = 0
         // Carries across the whole drain so a subtree one event just fully indexed isn't
         // re-listed by a sibling or descendant event in the same pass.
         var newlyIndexed = Set<String>()
         // Loop until the backlog is empty so changes that arrive mid-drain aren't lost.
         while !pendingDirs.isEmpty {
+            let generation = storeGeneration
             let dirs = pendingDirs.sorted()          // ancestors first
             let deep = pendingDeep
+            let eventID = pendingEventID
+            pendingEventID = 0
             pendingDirs.removeAll(keepingCapacity: true)
             pendingDeep.removeAll(keepingCapacity: true)
             // A mount or unmount shows up as a /Volumes change. Refresh the live
@@ -418,10 +416,9 @@ actor IndexActor {
             var changed = false
             for d in dirs {
                 // A MustScanSubDirs (deep) event resyncs the whole live subtree under `d`;
-                // a normal event resyncs just `d`. The descent is ITERATIVE — an explicit
-                // stack with an `await` between levels — never a synchronous recursion,
-                // which walked the whole subtree in one uninterruptible call and froze the
-                // actor (search shares it). A deep event on a VOLUME ROOT ("/", which the
+                // a normal event resyncs just `d`. An explicit stack and periodic yield
+                // let mount/rule changes interleave. Queries use a separate snapshot.
+                // A deep event on a VOLUME ROOT ("/", which the
                 // firmlinked Data volume canonicalizes to, or a /Volumes mount) would mean
                 // re-walking the entire disk — millions of dirs — so it's demoted to a
                 // single level; the launch event replay and File ▸ Rebuild Index cover that
@@ -429,19 +426,30 @@ actor IndexActor {
                 let descend = deep.contains(d) && !Self.isVolumeRoot(d)
                 var stack = [d]
                 while let dir = stack.popLast() {
+                    // A rebuild may start or complete while this drain yields.
+                    // Reconcile this batch against the replacement store afterward.
+                    if rebuildID != nil || generation != storeGeneration {
+                        pendingDirs.formUnion(dirs)
+                        pendingDeep.formUnion(deep)
+                        pendingEventID = max(pendingEventID, eventID)
+                        return
+                    }
                     if LiveMonitor.reconcileLevel(directory: dir, in: &store, rules: liveRules, volID: 1,
                                                   descend: descend, newlyIndexedDirs: &newlyIndexed,
                                                   pushChildDirsTo: &stack) { changed = true }
                     processed += 1
-                    // Suspend periodically so a queued search/sort runs instead of waiting
-                    // for the whole drain — this is what keeps the UI responsive under churn.
-                    if processed % 64 == 0 { await Task.yield() }
+                    // Publish progress in coherent batches and give actor control
+                    // operations a turn; searching itself never waits on this yield.
+                    if processed % 64 == 0 {
+                        if changed { publishStore(); changed = false }
+                        await Task.yield()
+                    }
                 }
             }
             if changed {
-                cachedQueryKey = nil
-                onLiveChange?()
+                publishStore()
             }
+            if !replayCheckpointBlocked { lastEventID = max(lastEventID, eventID) }
         }
     }
 
@@ -464,6 +472,7 @@ actor IndexActor {
     // readdir when its contents actually changed. Shallow (one level) on purpose:
     // a deep subtree walk would lstat the entire subtree every tick, which is not free.
     func sweepUserFolders() {
+        guard rebuildID == nil else { return }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let targets = ["Desktop", "Documents", "Downloads"].map { home + "/" + $0 }
         var newlyIndexed = Set<String>()
@@ -473,18 +482,18 @@ actor IndexActor {
                                      newlyIndexedDirs: &newlyIndexed) { changed = true }
         }
         guard changed else { return }
-        cachedQueryKey = nil
-        onLiveChange?()
+        publishStore()
     }
 
-    // Persist the current store + a fresh event id so the next launch can replay
-    // only the changes that happened after this point.
-    func flush() {
+    // Persist on a separate writer with the last fully reconciled event id.
+    func flush() async {
         // Quitting permission onboarding must not create an empty cache that
         // masquerades as a completed first scan on the next launch.
-        guard store.count > 0 else { return }
-        lastEventID = FSEventsGetCurrentEventId()
-        try? IndexCache.save(store, to: Self.cacheURL(), lastEventID: lastEventID,
-                             rulesFingerprint: cacheFingerprint())
+        guard store.count > 0, let fingerprint = storeFingerprint else { return }
+        // Keep the last safely applied checkpoint; the current system event id
+        // can include directories still waiting in our coalesced event queue.
+        cacheRevision &+= 1
+        try? await cacheWriter.save(store, to: Self.cacheURL(), lastEventID: lastEventID,
+                                    rulesFingerprint: fingerprint, revision: cacheRevision)
     }
 }

@@ -15,6 +15,8 @@ public struct FileStore: Sendable {
     private var flags: [UInt8] = []     // bit0 = isDir
     private var volIDs: [UInt32] = []
     private var live: [Bool] = []
+    // Derived fuzzy-search rejection masks. Old binary caches remain compatible.
+    private var nameMasks: [UInt64] = []
 
     // parent id → its child ids. Without this, child/path lookups are O(n) scans
     // that rebuild every record's path string — FSEvents reconcile then pegs a
@@ -35,6 +37,16 @@ public struct FileStore: Sendable {
 
     public var count: Int { parents.count }
 
+    // Search needs names and metadata, not the writer's mutable lookup tables.
+    // Dropping those references avoids copying a large dictionary just to record
+    // an unchanged directory's reconcile mtime.
+    func searchSnapshot() -> FileStore {
+        var copy = self
+        copy.childrenByParent = [:]
+        copy.dirReconcileMtime = [:]
+        return copy
+    }
+
     /// Appends a new record to the store and returns its id.
     /// `name` must be a single path component (≤ NAME_MAX = 255 bytes).
     /// `nameLen` is stored as `UInt16`; names longer than 65535 bytes will trap.
@@ -46,6 +58,7 @@ public struct FileStore: Sendable {
         nameOffset.append(UInt32(nameBytes.count))
         nameLen.append(UInt16(bytes.count))
         nameBytes.append(contentsOf: bytes)
+        nameMasks.append(FuzzyMatcher.mask(bytes))
         parents.append(parent)
         sizes.append(size)
         mtimes.append(mtime)
@@ -68,6 +81,17 @@ public struct FileStore: Sendable {
         let i = Int(id)
         let start = Int(nameOffset[i])
         return nameBytes[start..<(start + Int(nameLen[i]))]
+    }
+
+    func nameMask(of id: UInt32) -> UInt64 { nameMasks[Int(id)] }
+
+    func nameRange(of id: UInt32) -> Range<Int> {
+        let start = Int(nameOffset[Int(id)])
+        return start..<(start + Int(nameLen[Int(id)]))
+    }
+
+    func withNameArena<R>(_ body: (UnsafeBufferPointer<UInt8>) -> R) -> R {
+        nameBytes.withUnsafeBufferPointer(body)
     }
 
     /// ASCII-case-insensitive lexicographic compare of two records' names by their
@@ -251,6 +275,9 @@ public struct FileStore: Sendable {
         guard cursor + 8 <= data.count else { return nil }
         let n = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: cursor, as: UInt64.self) }
         cursor += 8
+        // Check before converting/multiplying a count from disk. A corrupt cache
+        // must fail to load, never overflow or create an out-of-bounds byte view.
+        guard n <= UInt64((data.count - cursor) / MemoryLayout<T>.stride) else { return nil }
         let bytes = Int(n) * MemoryLayout<T>.stride
         guard cursor + bytes <= data.count else { return nil }
         let arr = [T](unsafeUninitializedCapacity: Int(n)) { buf, initialized in
@@ -292,9 +319,18 @@ public struct FileStore: Sendable {
               let fl = Self.readArray(UInt8.self, from: data, &cursor),
               let vo = Self.readArray(UInt32.self, from: data, &cursor),
               let lv = Self.readArray(Bool.self, from: data, &cursor) else { return nil }
+        let n = pa.count
+        guard n <= Int(UInt32.max), no.count == n, nl.count == n, sz.count == n,
+              mt.count == n, fl.count == n, vo.count == n, lv.count == n else { return nil }
+        for i in 0..<n {
+            let offset = Int(no[i]), length = Int(nl[i])
+            guard offset <= nb.count, length <= nb.count - offset,
+                  pa[i] == Self.noParent || pa[i] < UInt32(i) else { return nil }
+        }
         nameBytes = nb; nameOffset = no; nameLen = nl; parents = pa
         sizes = sz; mtimes = mt; flags = fl; volIDs = vo; live = lv
         rebuildChildIndex()
+        nameMasks = (0..<count).map { FuzzyMatcher.mask(nameBytesSlice(of: UInt32($0))) }
     }
 
     // Rebuild the derived parent→children index (and rootID) from `parents`.

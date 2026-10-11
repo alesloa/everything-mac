@@ -25,6 +25,9 @@ struct AppCommands: Commands {
         Binding(get: { model.wholeWord },
                 set: { model.wholeWord = $0; model.searchOptionsChanged() })
     }
+    private var fuzzyBinding: Binding<Bool> {
+        Binding(get: { model.fuzzy }, set: { model.fuzzy = $0; model.searchOptionsChanged() })
+    }
 
     var body: some Commands {
         // FILE — act on the selected result, plus index/export actions.
@@ -70,6 +73,8 @@ struct AppCommands: Commands {
         CommandMenu("View") {
             Menu("Sort By") {
                 Picker("Sort By", selection: sortBinding) {
+                    // Source: QueryEngine's fuzzy score and the owner's search request.
+                    Text("Relevance").tag(QueryEngine.SortKey.relevance)
                     Text("Name").tag(QueryEngine.SortKey.name)
                     Text("Path").tag(QueryEngine.SortKey.path)
                     Text("Size").tag(QueryEngine.SortKey.size)
@@ -78,7 +83,9 @@ struct AppCommands: Commands {
                 }
                 .pickerStyle(.inline)
             }
-            Button(model.ascending ? "Sort Descending" : "Sort Ascending") {
+            Button(model.sortKey == .relevance
+                   ? (model.ascending ? "Best Match Last" : "Best Match First")
+                   : (model.ascending ? "Sort Descending" : "Sort Ascending")) {
                 model.setSort(model.sortKey, ascending: !model.ascending)
             }
             Divider()
@@ -86,6 +93,8 @@ struct AppCommands: Commands {
                 .keyboardShortcut("p", modifiers: [.command, .shift])
             Toggle("Match Case", isOn: caseSensitiveBinding)
             Toggle("Match Whole Word", isOn: wholeWordBinding)
+            Toggle("Fuzzy Matching", isOn: fuzzyBinding)
+                .disabled(model.wholeWord)
         }
 
         // HELP — point at the project instead of the empty default Help menu.

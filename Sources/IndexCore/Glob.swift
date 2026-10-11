@@ -94,7 +94,8 @@ public extension Glob {
     /// Haystack bytes are ASCII-case-folded on the fly; non-ASCII haystack bytes are
     /// compared as-is (an ASCII pattern never matches them, which is correct).
     /// Substring match when pattern has no `*` (0x2A) / `?` (0x3F); else anchored glob.
-    static func matchesASCII(patternLowerBytes pattern: [UInt8], in hay: ArraySlice<UInt8>) -> Bool {
+    static func matchesASCII<Bytes: RandomAccessCollection>(patternLowerBytes pattern: [UInt8], in hay: Bytes) -> Bool
+        where Bytes.Element == UInt8, Bytes.Index == Int {
         let hasWildcard = pattern.contains(0x2A) || pattern.contains(0x3F)
         if hasWildcard {
             return bytesGlobMatch(pattern: pattern, hay: hay)
@@ -109,7 +110,8 @@ public extension Glob {
         b >= 0x41 && b <= 0x5A ? b &+ 0x20 : b
     }
 
-    private static func bytesContains(hay: ArraySlice<UInt8>, needle: [UInt8]) -> Bool {
+    private static func bytesContains<Bytes: RandomAccessCollection>(hay: Bytes, needle: [UInt8]) -> Bool
+        where Bytes.Element == UInt8, Bytes.Index == Int {
         if needle.isEmpty { return true }
         let hc = hay.count
         let nc = needle.count
@@ -126,7 +128,8 @@ public extension Glob {
         return false
     }
 
-    private static func bytesGlobMatch(pattern: [UInt8], hay: ArraySlice<UInt8>) -> Bool {
+    private static func bytesGlobMatch<Bytes: RandomAccessCollection>(pattern: [UInt8], hay: Bytes) -> Bool
+        where Bytes.Element == UInt8, Bytes.Index == Int {
         let pc = pattern.count
         let hc = hay.count
         let hayBase = hay.startIndex
