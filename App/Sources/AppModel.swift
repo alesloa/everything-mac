@@ -38,6 +38,7 @@ final class AppModel: ObservableObject {
     @Published var activePanel: AppFeaturePanel?
     @Published var previewVisible = false
     @Published var thumbnailView = false
+    @Published var previewAllowsNetwork = false
     @Published var selectedRecords: [FileRecord] = []
     // Max rows handed to the table — the old hardcoded 5000 cap, now user-tunable.
     @Published var resultLimit = 5000
@@ -68,6 +69,7 @@ final class AppModel: ObservableObject {
 
     let index: IndexActor
     let preferences: UserDefaults
+    let workspace: SearchWorkspaceController
     private var task: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
     private var flushTimer: Task<Void, Never>?
@@ -83,9 +85,12 @@ final class AppModel: ObservableObject {
     private weak var backgroundOwner: AppModel?
     private var backgroundSubscriptions: Set<AnyCancellable> = []
 
-    init(index: IndexActor = IndexActor(), preferences: UserDefaults = .standard) {
+    init(index: IndexActor = IndexActor(), preferences: UserDefaults = .standard,
+         workspace: SearchWorkspaceController? = nil) {
         self.index = index
         self.preferences = preferences
+        self.workspace = workspace ?? SearchWorkspaceController(library:
+            preferences === UserDefaults.standard ? .shared : WorkspaceLibrary(preferences: preferences))
     }
 
     func bootstrap() {
@@ -238,6 +243,7 @@ final class AppModel: ObservableObject {
 
     func queryChanged() {
         savePrefs()   // also captures a Match-path toggle (shares this entry point)
+        workspaceStateChanged()
         task?.cancel()
         searchTask?.cancel()
         searchSeq &+= 1
@@ -262,7 +268,12 @@ final class AppModel: ObservableObject {
         searchTask?.cancel()
         searchSeq &+= 1
         let mySeq = searchSeq
-        let query = currentQuery
+        let query: Query
+        do { query = try resolvedWorkspaceQuery() }
+        catch {
+            // Source: the saved-query expansion's actual error for this workspace.
+            searchError = error.localizedDescription; results = []; return
+        }
         if let error = query.validationError {
             // Source: the parser's validation error for the owner's entered query.
             searchError = error.localizedDescription
@@ -279,7 +290,10 @@ final class AppModel: ObservableObject {
         // Only the most recently started search may publish — stops a slower
         // in-flight search (e.g. from a live-refresh tick) clobbering newer
         // results with a stale sort order.
-        if mySeq == searchSeq && !Task.isCancelled && !worker.isCancelled { results = r }
+        if mySeq == searchSeq && !Task.isCancelled && !worker.isCancelled {
+            results = r
+            recordCompletedWorkspaceSearch()
+        }
     }
 
     // Coalesce bursts of FSEvents into at most one refresh per 200ms.
@@ -313,6 +327,7 @@ final class AppModel: ObservableObject {
             results.contains { $0.id == selected.id && $0.path.utf8.elementsEqual(selected.path.utf8) }
         }
         selectedID = selectedRecords.first?.id
+        QuickLookController.shared.updateSelection(actionRecords, allowsNetwork: previewAllowsNetwork)
     }
 
     var currentQuery: Query {
@@ -344,6 +359,7 @@ final class AppModel: ObservableObject {
         }
         previewVisible = d.bool(forKey: "pref.previewVisible")
         thumbnailView = d.bool(forKey: "pref.thumbnailView")
+        previewAllowsNetwork = d.bool(forKey: "pref.previewAllowsNetwork")
         let lim = d.integer(forKey: "pref.resultLimit")
         resultLimit = lim > 0 ? lim : 5000
         if hasFuzzyPref {
@@ -367,9 +383,11 @@ final class AppModel: ObservableObject {
         d.set(searchFilter.rawValue, forKey: "pref.searchFilter")
         d.set(previewVisible, forKey: "pref.previewVisible")
         d.set(thumbnailView, forKey: "pref.thumbnailView")
+        d.set(previewAllowsNetwork, forKey: "pref.previewAllowsNetwork")
         d.set(resultLimit, forKey: "pref.resultLimit")
         d.set(Self.sortKeyName(sortKey), forKey: "pref.sortKey")
         d.set(ascending, forKey: "pref.ascending")
+        workspaceStateChanged()
     }
 
     // SortKey has no rawValue (the byte comparators don't need one); map it by hand

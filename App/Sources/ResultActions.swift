@@ -110,8 +110,11 @@ import UniformTypeIdentifiers
                 try input.fileHandleForWriting.close()
                 let data = try errors.fileHandleForReading.readToEnd() ?? Data()
                 process.waitUntilExit()
-                if process.terminationStatus != 0, !data.isEmpty {
-                    await state.showError(String(decoding: data, as: UTF8.self), title: "Get Info")
+                if process.terminationStatus != 0 {
+                    // Source: osascript's stderr or its actual process exit status.
+                    let message = data.isEmpty ? "osascript exited with status \(process.terminationStatus)"
+                        : String(decoding: data, as: UTF8.self)
+                    await state.showError(message, title: "Get Info")
                 }
             } catch { await state.showError((error as NSError).localizedDescription, title: "Get Info") }
         }

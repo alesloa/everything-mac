@@ -28,6 +28,7 @@ struct ContentView: View {
             }
             SearchField(text: $model.query, matchPath: $model.matchPath, fuzzy: $model.fuzzy,
                         wholeWord: model.wholeWord, focused: $searchFocused) { model.queryChanged() }
+            WorkspaceTabBar()
             HStack {
                 // Source: the built-in SearchFilter definitions and the owner's
                 // approved advanced-search addition.
@@ -45,11 +46,25 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
             Divider()
-            ResultsTable(rows: model.results,
-                         onSort: { k, a in model.setSort(k, ascending: a) },
-                         onSelect: { model.selectedID = $0?.id },
-                         onActivate: { ResultActions.open($0) },
-                         onSelection: { model.selectRecords($0) })
+            HSplitView {
+                if model.thumbnailView {
+                    ThumbnailResultsView(rows: model.results, selectedRecords: model.actionRecords,
+                        onSelection: { model.selectRecords($0) }, onActivate: { ResultActions.open($0) },
+                        onPreview: { QuickLookController.shared.toggle($0, allowsNetwork: model.previewAllowsNetwork) },
+                        allowsNetwork: model.previewAllowsNetwork)
+                } else {
+                    ResultsTable(rows: model.results,
+                        onSort: { k, a in model.setSort(k, ascending: a) },
+                        onSelect: { model.selectedID = $0?.id }, onActivate: { ResultActions.open($0) },
+                        onSelection: { model.selectRecords($0) },
+                        onPreview: { QuickLookController.shared.toggle($0, allowsNetwork: model.previewAllowsNetwork) },
+                        selectedRecords: model.actionRecords)
+                }
+                if model.previewVisible {
+                    PreviewPane(records: model.actionRecords, allowsNetwork: model.previewAllowsNetwork)
+                        .frame(minWidth: 220, idealWidth: 320)
+                }
+            }
             if ResultActions.state.isBusy {
                 HStack {
                     // Source: the running task represented by FileActionState.isBusy.
@@ -66,14 +81,28 @@ struct ContentView: View {
         .background(.regularMaterial)
         .onAppear { searchFocused = true }
         .onChange(of: model.focusSearchSignal) { searchFocused = true }
-        .sheet(isPresented: Binding(get: { model.activePanel == .advancedSearch }, set: {
-            if !$0 { model.activePanel = nil }
-        })) {
-            AdvancedSearchView(initialQuery: advancedInitialQuery,
+        .onChange(of: model.actionRecords) { _, records in
+            QuickLookController.shared.updateSelection(records, allowsNetwork: model.previewAllowsNetwork)
+        }
+        .sheet(item: $model.activePanel) { panel in
+            featurePanel(panel).environmentObject(model)
+        }
+    }
+
+    @ViewBuilder private func featurePanel(_ panel: AppFeaturePanel) -> some View {
+        VStack(spacing: 0) {
+            HStack { Spacer(); Button("Close") { model.activePanel = nil }.keyboardShortcut(.cancelAction) }.padding(10)
+            switch panel {
+            case .advancedSearch:
+                AdvancedSearchView(initialQuery: advancedInitialQuery,
                 onApply: {
                     model.query = $0; model.regex = false; model.searchFilter = .all
                     model.activePanel = nil; model.queryChanged()
                 }, onCancel: { model.activePanel = nil })
+            case .bookmarks: SavedSearchesView()
+            case .history: SearchHistoryView()
+            default: EmptyView()
+            }
         }
     }
 

@@ -94,7 +94,7 @@ struct AppCommands: Commands {
             Toggle("Match Case", isOn: caseSensitiveBinding)
             Toggle("Match Whole Word", isOn: wholeWordBinding)
             Toggle("Fuzzy Matching", isOn: fuzzyBinding)
-                .disabled(model.wholeWord)
+                .disabled(model.wholeWord || model.regex || model.matchPrefix || model.matchSuffix)
             Divider()
             // Source: the owner's requested native previews and thumbnail view.
             Toggle("Preview", isOn: Binding(get: { model.previewVisible }, set: {
@@ -108,6 +108,7 @@ struct AppCommands: Commands {
 
         SearchFeatureCommands(model: model)
         FileActionCommands(model: model)
+        WorkspaceCommands(model: model)
 
         // HELP — point at the project instead of the empty default Help menu.
         CommandGroup(replacing: .help) {

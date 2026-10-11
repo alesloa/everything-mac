@@ -42,7 +42,12 @@ struct GlobalAccessWindowRegistration: NSViewRepresentable {
             closeObserver = NotificationCenter.default.publisher(for: NSWindow.willCloseNotification, object: window)
                 .sink { [weak window] _ in
                     MainActor.assumeIsolated {
-                        if let window { SearchWindowRegistry.shared.detach(window) }
+                        if let window {
+                            if !AppDelegate.isTerminating {
+                                SearchWindowRegistry.shared.model(for: window)?.workspace.closeWindow()
+                            }
+                            SearchWindowRegistry.shared.detach(window)
+                        }
                     }
                 }
         }
