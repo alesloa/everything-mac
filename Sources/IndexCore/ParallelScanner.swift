@@ -23,10 +23,10 @@ public enum ParallelScanner {
             self.progress = progress
         }
 
-        func appendRoot(name: String) -> UInt32 {
+        func appendRoot(name: String, size: UInt64, mtime: Int64) -> UInt32 {
             lock.lock(); defer { lock.unlock() }
             return store.append(name: name, parent: FileStore.noParent,
-                                size: 0, mtime: 0, isDir: true, volID: volID)
+                                size: size, mtime: mtime, isDir: true, volID: volID)
         }
 
         // Append all children of `parent`, returning their ids in input order so
@@ -115,9 +115,10 @@ public enum ParallelScanner {
                             progress: (@Sendable (Int) -> Void)? = nil) -> FileStore {
         guard !isCancelled() else { return FileStore() }
         let rootName = Scanner.normalizedRoot(root)
-        guard let rootEntries = readDirectory(rootName, root: rootName, rules: rules, isCancelled: isCancelled) else { return FileStore() }
+        guard let rootEntries = readDirectory(rootName, root: rootName, rules: rules, isCancelled: isCancelled),
+              let metadata = rootEntries.rootMetadata else { return FileStore() }
         let builder = Builder(volID: volID, progress: progress)
-        let rootID = builder.appendRoot(name: rootName)
+        let rootID = builder.appendRoot(name: rootName, size: metadata.size, mtime: metadata.mtime)
         if rootEntries.incomplete { builder.markIncomplete(rootID) }
         let ids = builder.appendChildren(rootEntries.entries, parent: rootID, isCancelled: isCancelled)
         let initial = zip(rootEntries.entries, ids).filter { $0.0.isDir }.map { ($0.0.path, $0.1) }
@@ -152,9 +153,16 @@ public enum ParallelScanner {
     // marker pass is what lets generic names like "build"/"target" be skipped inside
     // a real project but kept for an unrelated user folder of the same name.
     private static func readDirectory(_ path: String, root: String, rules: ExcludeRules,
-                                      isCancelled: @Sendable () -> Bool) -> (entries: [Entry], incomplete: Bool)? {
+                                      isCancelled: @Sendable () -> Bool)
+        -> (entries: [Entry], incomplete: Bool, rootMetadata: (size: UInt64, mtime: Int64)?)? {
         guard !isCancelled(), let dir = Scanner.openDirectory(path, relativeTo: root) else { return nil }
         defer { closedir(dir) }
+        var rootMetadata: (size: UInt64, mtime: Int64)?
+        if path.utf8.elementsEqual(root.utf8) {
+            var metadata = stat()
+            guard fstat(dirfd(dir), &metadata) == 0, metadata.st_size >= 0 else { return nil }
+            rootMetadata = (UInt64(metadata.st_size), Int64(metadata.st_mtimespec.tv_sec))
+        }
         var names: [String] = []
         var inProjectDir = false
         while true {
@@ -189,6 +197,6 @@ public enum ParallelScanner {
             out.append(Entry(name: name, path: full, isDir: isDir,
                              size: UInt64(st.st_size), mtime: Int64(st.st_mtimespec.tv_sec)))
         }
-        return (out, incomplete)
+        return (out, incomplete, rootMetadata)
     }
 }

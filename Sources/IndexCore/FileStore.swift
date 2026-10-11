@@ -197,7 +197,8 @@ public struct FileStore: Sendable {
             let id = UInt32(i)
             guard sub.isLive(id) else { continue }
             if id == sub.rootID {
-                let r = append(name: rootName, parent: parent, size: 0, mtime: 0, isDir: true, volID: volID)
+                let r = append(name: rootName, parent: parent, size: sub.size(of: id),
+                               mtime: sub.mtime(of: id), isDir: sub.isDir(of: id), volID: volID)
                 idMap[i] = r; newRoot = r
                 continue
             }
