@@ -26,6 +26,8 @@ So I wrote my own. It reads every filename on the machine into memory and search
 - Shows the real file-type icon and a readable kind for each row.
 - Right-click menu: Open, Open With (lists every app associated with the file, plus a "Choose Application…" option to open it with anything), Reveal in Finder, Copy Path, Copy Name, Move to Trash.
 - Handles millions of files without choking. The index is a flat array scanned in parallel across all cores.
+- First-launch onboarding waits for Full Disk Access before scanning, with an option to continue without it.
+- Opt-in network-volume indexing in Settings > Volumes. Selected shares are scanned in the background, retain cached results while offline, and reconnect at launch and after sleep using credentials already saved in the keychain.
 
 ## Requirements
 
@@ -57,6 +59,12 @@ The app can only index everything if you give it Full Disk Access:
 System Settings > Privacy & Security > Full Disk Access > turn on EverythingMac.
 
 The first launch scans the whole disk and writes the index to a cache, so it takes a few minutes depending on how many files you have. After that it starts instantly and picks up file changes as they happen.
+
+### Network volumes
+
+In Settings > Volumes, choose **Add Network Volume…**, select a mounted share or a folder on it, then click **Apply & Re-index**. The whole share is indexed separately from local drives. Automatic reconnection requires credentials already saved by Finder.
+
+Network shares refresh when they reconnect or when you rebuild the index. Changes made while a share stays mounted do not appear live. Cached results can still be searched when a share is offline; opening a result requires the share to be reachable.
 
 ## Using it
 

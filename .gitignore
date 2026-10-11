@@ -9,8 +9,8 @@ App/EverythingMac.app
 *.xcworkspace
 .swiftpm/
 
-# Tests (not needed to build or run the app; Package.swift wires them in only
-# when the Tests directory is present)
+# Local test suites (individual regression files can be tracked explicitly).
+# Package.swift wires the test target only when the directory is present.
 Tests/
 
 # macOS, logs, crash dumps

@@ -16,13 +16,17 @@ public enum ParallelScanner {
         private let lock = NSLock()
         private var lastReported = 0
         private let progress: (@Sendable (Int) -> Void)?
+        private let volID: UInt32
 
-        init(progress: (@Sendable (Int) -> Void)?) { self.progress = progress }
+        init(volID: UInt32, progress: (@Sendable (Int) -> Void)?) {
+            self.volID = volID
+            self.progress = progress
+        }
 
         func appendRoot(name: String) -> UInt32 {
             lock.lock(); defer { lock.unlock() }
             return store.append(name: name, parent: FileStore.noParent,
-                                size: 0, mtime: 0, isDir: true, volID: 1)
+                                size: 0, mtime: 0, isDir: true, volID: volID)
         }
 
         // Append all children of `parent`, returning their ids in input order so
@@ -31,7 +35,7 @@ public enum ParallelScanner {
             lock.lock()
             let ids = entries.map {
                 store.append(name: $0.name, parent: parent, size: $0.size,
-                             mtime: $0.mtime, isDir: $0.isDir, volID: 1)
+                             mtime: $0.mtime, isDir: $0.isDir, volID: volID)
             }
             let count = store.count
             let crossed = count / 50_000 != lastReported / 50_000
@@ -84,12 +88,21 @@ public enum ParallelScanner {
     /// so call it from a detached task, never on the actor.
     public static func scanWholeDisk(rules: ExcludeRules,
                                      progress: (@Sendable (Int) -> Void)? = nil) -> FileStore {
-        let builder = Builder(progress: progress)
-        let rootID = builder.appendRoot(name: "/")
-        let queue = DirQueue(seed: ("/", rootID))
+        scan(root: "/", rules: rules, volID: 1,
+             workers: max(2, ProcessInfo.processInfo.activeProcessorCount), progress: progress)
+    }
 
-        let workers = max(2, ProcessInfo.processInfo.activeProcessorCount)
-        DispatchQueue.concurrentPerform(iterations: workers) { _ in
+    /// Scan one directory tree into its own FileStore, rooted at `root` (stored as
+    /// the root record's name so paths come out absolute). `workers` is capped by
+    /// the caller: a network share wants a few parallel readers, not every core.
+    public static func scan(root: String, rules: ExcludeRules, volID: UInt32, workers: Int,
+                            progress: (@Sendable (Int) -> Void)? = nil) -> FileStore {
+        let builder = Builder(volID: volID, progress: progress)
+        let rootName = root == "/" ? "/" : (root.hasSuffix("/") ? String(root.dropLast()) : root)
+        let rootID = builder.appendRoot(name: rootName)
+        let queue = DirQueue(seed: (rootName, rootID))
+
+        DispatchQueue.concurrentPerform(iterations: max(1, workers)) { _ in
             while let (path, parent) = queue.claim() {
                 let entries = readDirectory(path, rules: rules)
                 let ids = builder.appendChildren(entries, parent: parent)

@@ -35,6 +35,9 @@ public final class LiveMonitor: @unchecked Sendable {
                                  rules: ExcludeRules, volID: UInt32,
                                  newlyIndexedDirs: inout Set<String>) -> Bool {
         guard let dirID = store.idForDirPath(directory) else { return false }
+        // Grafted network trees are refreshed by their own background scanner.
+        // Reject them before stat/opendir can stall the actor on remote I/O.
+        guard store.volID(of: dirID) == volID else { return false }
 
         // Cheap gate: a directory's mtime advances only when its entries are
         // added/removed/renamed, NOT when a file's contents change. Most FSEvents are
@@ -48,12 +51,15 @@ public final class LiveMonitor: @unchecked Sendable {
             ? Int64(dst.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(dst.st_mtimespec.tv_nsec) : 0
         if haveStat, store.reconcileMtime(of: dirID) == diskMtimeNs { return false }
 
-        let existing = store.childIDs(of: dirID)
+        // Children of other volumes (a network share grafted under /Volumes) are
+        // managed by their own scan, so only this volume's records are diffed away.
+        let allChildren = store.childIDs(of: dirID)
+        let existing = allChildren.filter { store.volID(of: $0) == volID }
 
         guard let dir = opendir(directory) else {
             // The directory itself is gone — tombstone whatever children remain.
             var changed = false
-            for id in existing { markSubtreeDeleted(id, in: &store); changed = true }
+            for id in existing { store.markSubtreeDeleted(id); changed = true }
             return changed
         }
         defer { closedir(dir) }
@@ -77,16 +83,19 @@ public final class LiveMonitor: @unchecked Sendable {
         // O(entries · children) per reconcile — quadratic, which pegged a core when a
         // big, busy directory (a browser cache with thousands of files) reconciled on
         // every add/remove. Building one Set makes the whole diff O(entries + children).
-        var existingNames = Set<String>(minimumCapacity: existing.count)
-        for id in existing { existingNames.insert(store.name(of: id)) }
+        var existingNames = Set<String>(minimumCapacity: allChildren.count)
+        for id in allChildren { existingNames.insert(store.name(of: id)) }
 
         var onDisk = Set<String>()
         var changed = false
+        let nonLocalMounts = Set(MountTable.nonLocalMounts().map(\.path))
         for name in names {
             let full = (directory as NSString).appendingPathComponent(name)
             if rules.shouldExclude(name: name, path: full, isHidden: name.hasPrefix("."), inProjectDir: inProjectDir) { continue }
             onDisk.insert(name)
             if !existingNames.contains(name) {
+                // Check before lstat: even stat'ing a stalled share can block.
+                if nonLocalMounts.contains(full) { continue }
                 var st = stat()
                 guard lstat(full, &st) == 0 else { continue }
                 let isDir = (st.st_mode & S_IFMT) == S_IFDIR
@@ -109,7 +118,7 @@ public final class LiveMonitor: @unchecked Sendable {
         for id in existing where !onDisk.contains(store.name(of: id)) {
             // Deleting a directory must tombstone its whole subtree, not just the
             // dir entry, or descendants linger as live ghost results.
-            markSubtreeDeleted(id, in: &store)
+            store.markSubtreeDeleted(id)
             changed = true
         }
         // Remember the mtime we just reconciled at so repeat events for this dir
@@ -144,7 +153,7 @@ public final class LiveMonitor: @unchecked Sendable {
                                 newlyIndexedDirs: &newlyIndexedDirs)
         guard descend, let dirID = store.idForDirPath(directory) else { return changed }
         // Snapshot of live child dirs after reconcile (includes any just appended).
-        for childID in store.childIDs(of: dirID) where store.isDir(of: childID) {
+        for childID in store.childIDs(of: dirID) where store.isDir(of: childID) && store.volID(of: childID) == volID {
             let childPath = store.path(of: childID)
             // A subtree just fully indexed (new dir → indexContents) is already current.
             if newlyIndexedDirs.contains(where: { childPath == $0 || childPath.hasPrefix($0 + "/") }) { continue }
@@ -164,13 +173,6 @@ public final class LiveMonitor: @unchecked Sendable {
         if path == alias { return "/" }
         if path.hasPrefix(alias + "/") { return String(path.dropFirst(alias.count)) }
         return path
-    }
-
-    private static func markSubtreeDeleted(_ id: UInt32, in store: inout FileStore) {
-        store.markDeleted(id)
-        for child in store.childIDs(of: id) {
-            markSubtreeDeleted(child, in: &store)
-        }
     }
 
     public func start(paths: [String],

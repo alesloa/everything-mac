@@ -35,7 +35,7 @@ enum FullDiskAccess {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", "sleep 0.5; open -n \"$0\"", path]
-        try? p.run()
+        do { try p.run() } catch { return }
         NSApp.terminate(nil)
     }
 }

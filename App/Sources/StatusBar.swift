@@ -4,6 +4,7 @@ struct StatusBar: View {
     var total: Int
     var shown: Int
     var scanning: Bool
+    var shares: [NetworkShareStatus] = []
     var body: some View {
         HStack(spacing: 6) {
             if scanning {
@@ -14,6 +15,15 @@ struct StatusBar: View {
                 Text("Indexing… \(total.formatted()) files")
             } else {
                 Text("\(total.formatted()) objects")
+            }
+            ForEach(shares.filter { $0.scanning || $0.isOffline }) { s in
+                Text("·")
+                if s.scanning {
+                    Text("Indexing \(s.share.name)… \(s.count.formatted())")
+                } else {
+                    Image(systemName: "bolt.horizontal.circle")
+                    Text("\(s.share.name) offline")
+                }
             }
             Spacer()
             Text("\(shown.formatted()) results")

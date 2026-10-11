@@ -148,6 +148,54 @@ public struct FileStore: Sendable {
         if live[Int(id)] { live[Int(id)] = false; deletedCount += 1 }
     }
 
+    public mutating func markSubtreeDeleted(_ id: UInt32) {
+        markDeleted(id)
+        for child in childIDs(of: id) { markSubtreeDeleted(child) }
+    }
+
+    /// Tombstone every live record of a volume. Returns how many were removed.
+    @discardableResult
+    public mutating func markDeleted(volID: UInt32) -> Int {
+        var n = 0
+        for i in 0..<parents.count where live[i] && volIDs[i] == volID {
+            live[i] = false; deletedCount += 1; n += 1
+        }
+        return n
+    }
+
+    public func liveCount(volID: UInt32) -> Int {
+        var n = 0
+        for i in 0..<parents.count where live[i] && volIDs[i] == volID { n += 1 }
+        return n
+    }
+
+    /// Graft a separately scanned tree under `parent`. The subtree's root becomes a
+    /// new child of `parent` named by the last component of its root path; every
+    /// other record is copied with remapped parent ids and tagged `volID`. Requires
+    /// the subtree's records to be in parent-before-child order, which both scanners
+    /// guarantee. Returns the id of the grafted root.
+    @discardableResult
+    public mutating func merge(_ sub: FileStore, asChildOf parent: UInt32, volID: UInt32) -> UInt32? {
+        guard sub.rootID != Self.noParent else { return nil }
+        let rootName = (sub.name(of: sub.rootID) as NSString).lastPathComponent
+        var idMap = [UInt32](repeating: Self.noParent, count: sub.count)
+        var newRoot: UInt32?
+        for i in 0..<sub.count {
+            let id = UInt32(i)
+            guard sub.isLive(id) else { continue }
+            if id == sub.rootID {
+                let r = append(name: rootName, parent: parent, size: 0, mtime: 0, isDir: true, volID: volID)
+                idMap[i] = r; newRoot = r
+                continue
+            }
+            let p = idMap[Int(sub.parent(of: id))]
+            guard p != Self.noParent else { continue }
+            idMap[i] = append(name: sub.name(of: id), parent: p, size: sub.size(of: id),
+                              mtime: sub.mtime(of: id), isDir: sub.isDir(of: id), volID: volID)
+        }
+        return newRoot
+    }
+
     /// Live-reconcile fast path: the mtime (nanoseconds) a directory was last
     /// reconciled at. Repeat FSEvents whose dir mtime is unchanged take a cheap skip
     /// instead of re-reading the directory. nil until a dir's first reconcile this
