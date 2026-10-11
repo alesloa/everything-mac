@@ -180,3 +180,78 @@ private func cacheURL() -> URL {
     #expect(accepted && !rejected)
     #expect(!writer.isLive(3) && writer.deletedCount == 1)
 }
+
+private final class WeakMappedOwner {
+    weak var value: StoreBytes?
+    init(_ value: StoreBytes) { self.value = value }
+}
+
+private func awaitNames(_ preparation: UniqueNameIndex.Preparation) async throws -> UniqueNameIndex? {
+    let clock = ContinuousClock(), deadline = clock.now.advanced(by: .seconds(5))
+    while clock.now < deadline {
+        if let ready = preparation.ready() { return ready }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    return preparation.ready()
+}
+
+@Test func cancelledLastPreparationLeasesReleaseActualMappedOwners() async throws {
+    var source = fixture()
+    for i in 0..<100_000 {
+        source.append(name: "obsolete-\(i)-FinalReport.pdf", parent: 1, size: 1, mtime: 0, isDir: false, volID: 1)
+    }
+    let url = cacheURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    try IndexCache.save(source, to: url, lastEventID: 1, rulesFingerprint: 2)
+    var owners: [WeakMappedOwner] = []
+    for _ in 0..<12 {
+        do {
+            let bytes = try StoreBytes(file: url)
+            let store = try #require(FileStore(storage: bytes, offset: 20, buildWriterIndex: false))
+            owners.append(WeakMappedOwner(bytes))
+            let obsolete = UniqueNameIndex.Preparation(store: store)
+            obsolete.cancel()
+            obsolete.cancel()
+            #expect(obsolete.ready() == nil)
+        }
+    }
+    let clock = ContinuousClock(), deadline = clock.now.advanced(by: .seconds(2))
+    while owners.contains(where: { $0.value != nil }) && clock.now < deadline {
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    // Cached builders and queued/running job inputs must not form a mapping cycle.
+    #expect(owners.allSatisfy { $0.value == nil })
+    let bytes = try StoreBytes(file: url)
+    let currentStore = try #require(FileStore(storage: bytes, offset: 20, buildWriterIndex: false))
+    let current = UniqueNameIndex.Preparation(store: currentStore)
+    let names = try await awaitNames(current)
+    #expect(names?.layers.reduce(0) { $0 + $1.recordNames.count } == currentStore.count)
+}
+
+@Test func overlappingMappedPreparationLeasesReuseBaseLayerAcrossLiveSnapshots() async throws {
+    let url = cacheURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    try IndexCache.save(fixture(), to: url, lastEventID: 1, rulesFingerprint: 2)
+    var writer = try IndexCache.load(from: url).0
+    let initial = UniqueNameIndex.Preparation(store: writer.storageSnapshot())
+    writer.append(name: "FinalReport.pdf", parent: 1, size: 10, mtime: 11, isDir: false, volID: 1)
+    let updated = UniqueNameIndex.Preparation(store: writer.storageSnapshot())
+    // Releasing one lease must not cancel the base job needed by another snapshot.
+    initial.cancel()
+    let updatedReady = try await awaitNames(updated)
+    let updatedNames = try #require(updatedReady)
+    let baseLayer = try #require(updatedNames.layers.first)
+    #expect(baseLayer.recordRange == 0..<writer.baseCount)
+    #expect(updatedNames.layers.count == 2)
+    writer.markDeleted(2)
+    writer.append(name: "README.md", parent: 1, size: 20, mtime: 21, isDir: false, volID: 1)
+    let newest = UniqueNameIndex.Preparation(store: writer.storageSnapshot())
+    updated.cancel()
+    let newestReady = try await awaitNames(newest)
+    let newestNames = try #require(newestReady)
+    #expect(newestNames.layers[0] === baseLayer)
+    #expect(newestNames.layers[1].recordRange == writer.baseCount..<writer.count)
+    let engine = QueryEngine(), query = Query(text: "fnlrpt", fuzzy: true)
+    #expect(engine.matches(query, in: writer, nameIndex: newestNames) == engine.matches(query, in: writer))
+    #expect(initial.ready() == nil && updated.ready() == nil)
+}
