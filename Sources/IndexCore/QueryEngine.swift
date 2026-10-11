@@ -20,8 +20,14 @@ public struct QueryEngine: Sendable {
         if isCancelled() { return [] }
         if query.hasFuzzyTerms { return matches(query, in: store, candidates: candidates, isCancelled: isCancelled).map(\.id) }
         let ids = rawSearch(query, in: store, candidates: candidates, isCancelled: isCancelled)
+        guard !isCancelled() else { return [] }
         guard query.wholeWord else { return ids }
-        return ids.filter { !isCancelled() && wholeWordMatch(query, id: $0, in: store) }
+        var refined: [UInt32] = []
+        for id in ids {
+            if isCancelled() { return [] }
+            if wholeWordMatch(query, id: id, in: store) { refined.append(id) }
+        }
+        return isCancelled() ? [] : refined
     }
 
     // Every plain (non-wildcard) term must occur as a whole word in the candidate's
@@ -246,9 +252,18 @@ public extension QueryEngine {
     }
 
     func sort(_ ids: [UInt32], by key: SortKey, ascending: Bool, in store: FileStore) -> [UInt32] {
-        let asc = ascendingLess(key, in: store)
-        let less: (UInt32, UInt32) -> Bool = ascending ? asc : { asc($1, $0) }
-        return ids.sorted(by: less)
+        ids.sorted(by: sortLess(key, ascending: ascending, in: store))
+    }
+
+    private func sortLess(_ key: SortKey, ascending: Bool, in store: FileStore) -> (UInt32, UInt32) -> Bool {
+        let primary = ascendingLess(key, in: store)
+        return { a, b in
+            if primary(a, b) { return ascending }
+            if primary(b, a) { return !ascending }
+            // Stable record-ID ties make a bounded heap select the same rows as
+            // a complete sort, including duplicate sizes, timestamps and names.
+            return a < b
+        }
     }
 
     /// Return at most `limit` ids in sorted order without fully sorting `ids`.
@@ -260,10 +275,12 @@ public extension QueryEngine {
                       limit: Int, in store: FileStore,
                       isCancelled: @Sendable () -> Bool = { false }) -> [UInt32] {
         guard limit > 0, !isCancelled() else { return [] }
-        let asc = ascendingLess(key, in: store)
-        let earlier: (UInt32, UInt32) -> Bool = ascending ? asc : { asc($1, $0) }
+        let earlier = sortLess(key, ascending: ascending, in: store)
 
-        if ids.count <= limit { return ids.sorted(by: earlier) }
+        if ids.count <= limit {
+            let result = ids.sorted(by: earlier)
+            return isCancelled() ? [] : result
+        }
 
         // Max-heap keyed by "worse rank" — the element most likely to be evicted
         // sits at the root. `worse(x, y)` is true when x ranks AFTER y.
@@ -299,6 +316,7 @@ public extension QueryEngine {
                 heap[0] = id; siftDown(0)
             }
         }
-        return heap.sorted(by: earlier)
+        let result = heap.sorted(by: earlier)
+        return isCancelled() ? [] : result
     }
 }

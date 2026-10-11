@@ -21,9 +21,14 @@ public struct FileStore: Sendable {
     private var deletedWords: [Int: UInt64] = [:]
     private var childrenByParent: [UInt32: [UInt32]] = [:]
     private var dirReconcileMtime: [UInt32: Int64] = [:]
+    private var incompleteSubtrees: Set<UInt32> = []
     public private(set) var rootID: UInt32 = .max
     public private(set) var deletedCount = 0
     public private(set) var revision: UInt64 = 0
+    /// Whether a fresh scan read every included subtree. Not persisted in cache;
+    /// share refreshes use this to avoid replacing a complete tree with partial data.
+    public private(set) var scanCompleted = true
+    mutating func markScanIncomplete() { scanCompleted = false }
     public var hasDeletions: Bool { deletedCount > 0 }
     public var baseCount: Int { base?.count ?? 0 }
     public var overlayCount: Int { parents.count }
@@ -42,6 +47,7 @@ public struct FileStore: Sendable {
         var copy = self
         copy.childrenByParent = [:]
         copy.dirReconcileMtime = [:]
+        copy.incompleteSubtrees = []
         return copy
     }
 
@@ -148,6 +154,7 @@ public struct FileStore: Sendable {
         return i >= baseCount || base!.value(8, i, as: UInt8.self) == 1
     }
     public mutating func markDeleted(_ id: UInt32) {
+        incompleteSubtrees.remove(id)
         if isLive(id) {
                 let i = Int(id)
             deletedWords[i >> 6, default: 0] |= UInt64(1) << (i & 63)
@@ -190,7 +197,9 @@ public struct FileStore: Sendable {
             let id = UInt32(i)
             guard sub.isLive(id) else { continue }
             if id == sub.rootID {
-                let r = append(name: rootName, parent: parent, size: 0, mtime: 0, isDir: true, volID: volID)
+                // Source: the scanned substore retains the filesystem's root size and modification date.
+                let r = append(name: rootName, parent: parent, size: sub.size(of: id),
+                               mtime: sub.mtime(of: id), isDir: sub.isDir(of: id), volID: volID)
                 idMap[i] = r; newRoot = r
                 continue
             }
@@ -208,6 +217,18 @@ public struct FileStore: Sendable {
     /// session, so the first event always reconciles in full — no same-second miss.
     public func reconcileMtime(of id: UInt32) -> Int64? { dirReconcileMtime[id] }
     public mutating func setReconcileMtime(_ id: UInt32, _ nsec: Int64) { dirReconcileMtime[id] = nsec }
+    func subtreeIsIncomplete(_ id: UInt32) -> Bool { incompleteSubtrees.contains(id) }
+    mutating func setSubtreeIncomplete(_ id: UInt32, _ incomplete: Bool) {
+        guard incomplete else { incompleteSubtrees.remove(id); return }
+        // A later event for any ancestor must also retry the failed descendant.
+        var current = id
+        while isLive(current) {
+            incompleteSubtrees.insert(current)
+            let next = parent(of: current)
+            guard next != Self.noParent, next < current else { break }
+            current = next
+        }
+    }
 
     public func childIDs(of parent: UInt32) -> [UInt32] {
         guard let kids = childrenByParent[parent] else { return [] }
@@ -215,7 +236,10 @@ public struct FileStore: Sendable {
     }
 
     public func childID(named target: String, under parent: UInt32) -> UInt32? {
-        childrenByParent[parent]?.first { isLive($0) && name(of: $0) == target }
+        guard let children = childrenByParent[parent] else { return nil }
+        return withNameArena { arena in
+            children.first { isLive($0) && arena.bytes(in: nameRange(of: $0)).elementsEqual(target.utf8) }
+        }
     }
 
     // Resolve an absolute directory path to its id by walking the child index from
@@ -224,15 +248,15 @@ public struct FileStore: Sendable {
     // node's name is its full path ("/" for the app's whole-disk scan, or a temp
     // base path for a scoped Scanner), so we strip that prefix before walking.
     public func idForDirPath(_ path: String) -> UInt32? {
-        guard rootID != Self.noParent else { return nil }
+        guard rootID != Self.noParent, isLive(rootID), isDir(of: rootID) else { return nil }
         let rootName = name(of: rootID)
-        if path == rootName { return rootID }
-        guard path.hasPrefix(rootName) else { return nil }
-        var rest = path.dropFirst(rootName.count)
-        if rest.hasPrefix("/") { rest = rest.dropFirst() }   // unless rootName == "/"
+        if path.utf8.elementsEqual(rootName.utf8) { return rootID }
+        let prefix = rootName == "/" ? "/" : rootName + "/"
+        guard path.utf8.starts(with: prefix.utf8) else { return nil }
+        let rest = path.utf8.dropFirst(prefix.utf8.count)
         var cur = rootID
-        for comp in rest.split(separator: "/", omittingEmptySubsequences: true) {
-            guard let next = childID(named: String(comp), under: cur) else { return nil }
+        for comp in rest.split(separator: UInt8(47), omittingEmptySubsequences: true) {
+            guard let next = childID(named: String(decoding: comp, as: UTF8.self), under: cur), isDir(of: next) else { return nil }
             cur = next
         }
         return cur
@@ -338,6 +362,7 @@ public struct FileStore: Sendable {
         try IndexCache.save(self, to: url, lastEventID: 0, rulesFingerprint: 0)
         var result = try IndexCache.load(from: url, buildWriterIndex: false).0
         result.revision = revision
+        result.scanCompleted = scanCompleted
         result.lineage = lineage
         result.compactedRevision = revision
         return result

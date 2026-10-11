@@ -9,7 +9,7 @@ extension Query {
         guard !old.isEmpty, old.count == new.count else { return false }
         return zip(new, old).allSatisfy { term, prior in
             guard term.quoted == prior.quoted else { return false }
-            if term.text == prior.text { return true }
+            if term.text.utf8.elementsEqual(prior.text.utf8) { return true }
             // A longer whole word need not match its shorter predecessor.
             // Arbitrary glob edits can widen an anchored pattern as well.
             guard !wholeWord, !term.text.contains("*"), !term.text.contains("?"),

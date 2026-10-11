@@ -211,3 +211,18 @@ private final class NarrowingCancellationBudget: @unchecked Sendable {
         }
     }
 }
+
+@Test func literalQueryCachePreservesDistinctUnicodeScalarSpellings() async {
+    let store = narrowingStore(["Résumé.txt", "Re\u{301}sume\u{301}.txt"])
+    let composed = Query(text: "Ré")
+    let decomposed = Query(text: "Re\u{301}")
+    #expect(composed != decomposed)
+    #expect(!decomposed.narrows(composed))
+    let index = SearchIndex()
+    index.publish(store)
+    let first = await index.search(composed)
+    let second = await index.search(decomposed)
+    #expect(first.map(\.id) == QueryEngine().search(composed, in: store))
+    #expect(second.map(\.id) == QueryEngine().search(decomposed, in: store))
+    #expect(first.map(\.id) == [2] && second.map(\.id) == [3])
+}

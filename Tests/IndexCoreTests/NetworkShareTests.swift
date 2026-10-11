@@ -72,9 +72,11 @@ import Foundation
     #expect(store.count == 1)
 }
 
-@Test func defaultRulesKeepPreNetworkCacheFingerprint() {
-    // Fingerprint of ExcludeRules.defaults from main at bb178c4, before network shares.
-    #expect(ExcludeRules.defaults.fingerprint() == 5_371_999_411_695_464_081)
+@Test func directoryBoundaryPolicyInvalidatesPriorCacheFingerprint() {
+    // Fingerprint of ExcludeRules.defaults from main at bb178c4, also used before
+    // component-boundary and trailing-slash exclusion semantics changed.
+    #expect(ExcludeRules.defaults.fingerprint() != 5_371_999_411_695_464_081)
+    #expect(ExcludeRules.defaults.fingerprint() == ExcludeRules.defaults.fingerprint())
 }
 
 @Test func configuredSharesRoundTripAndInvalidateRulesFingerprint() throws {

@@ -56,12 +56,19 @@ To verify the non-blocking search path against the actual app indexing actor:
 ```bash
 swift test -c release
 ./scripts/test-search-isolation.sh
+./scripts/test-app-safety.sh
 ```
+
+The native app checks exercise selection and context-menu targets through live
+refreshes, overlapping rebuild cancellation, quoted TSV export, and preservation
+of known network files after incomplete scans. They use temporary fixtures and
+inspect action targets without opening or deleting files.
 
 The regressions in [`StartupSafetyTests.swift`](Tests/IndexCoreTests/StartupSafetyTests.swift)
 and [`TableSafety.swift`](Tests/AppIntegrationTests/TableSafety.swift) exercise watcher
 replacement/deallocation, corrupt cache counts, concurrent mount reads, and cached
-file-size rendering. Run them with Address Sanitizer using:
+file-size rendering. Run the complete engine suite and native table checks with
+Address Sanitizer using:
 
 ```bash
 ./scripts/test-startup-safety.sh

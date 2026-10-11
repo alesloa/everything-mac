@@ -24,13 +24,13 @@ enum FullDiskAccess {
         return true
     }
 
-    static func openSettings() {
+    @MainActor static func openSettings() {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
     }
 
     // macOS may apply a fresh Full Disk Access grant only to a new process, so the
     // onboarding view offers a relaunch instead of leaving the user to figure it out.
-    static func relaunch() {
+    @MainActor static func relaunch() {
         let path = Bundle.main.bundlePath
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")

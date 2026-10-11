@@ -24,6 +24,15 @@ All notable changes to EverythingMac are recorded here. The format is based on
 - Quitting permission onboarding no longer creates an empty cache that bypasses onboarding next launch.
 - Network mount availability no longer invalidates the cached index at launch.
 - Outdated network scans cannot reintroduce files excluded by changed settings, and local live indexing does not traverse network trees.
+- Selection and open context menus retain their file paths across live refreshes; rebuilt record IDs cannot redirect file actions to another result.
+- Superseded rebuilds stop their workers and discard late progress; canceled or failed root scans preserve the last searchable snapshot and safe event checkpoint.
+- Incomplete network refreshes preserve known files, complete refreshes replace stale local mount-point entries, and unchanged-rule rebuilds retain offline share entries. Each Connect button mounts only its selected share.
+- Live indexing preserves children after access failures, retries incomplete subtrees, handles file/directory replacements, and rejects replaced symlink ancestors.
+- Folder exclusions respect path-component boundaries; directory scope lookups reject similarly named outside paths and file nodes.
+- Directory lookup and live diffs preserve exact UTF-8 names, including distinct Unicode spellings. Scanned and grafted root sizes and modification dates come from filesystem metadata.
+- Cache loading rejects nonregular files without waiting on FIFO writers.
+- Unicode wildcard matching, literal query narrowing, fuzzy path typos, canceled whole-word searches, and tied result ordering now retain complete, consistent results.
+- TSV exports quote filename delimiters, and unavailable cache modification dates are omitted.
 
 ## [0.3.0] - 2026-06-24
 

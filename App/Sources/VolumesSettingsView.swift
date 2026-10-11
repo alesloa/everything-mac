@@ -49,7 +49,7 @@ struct VolumesSettingsView: View {
                         }
                         Spacer()
                         if mountPath(of: share) == nil, share.url != nil {
-                            Button("Connect") { model.reconnectShares(); refreshMounts(after: 3) }
+                            Button("Connect") { model.reconnectShare(share); refreshMounts(after: 3) }
                                 .buttonStyle(.borderless)
                         }
                         Button(role: .destructive) { edit.networkShares.removeAll { $0.source == share.source } } label: {
