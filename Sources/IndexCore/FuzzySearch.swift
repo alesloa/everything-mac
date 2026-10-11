@@ -33,9 +33,10 @@ extension QueryEngine {
     }
 
     public func matches(_ query: Query, in store: FileStore,
+                        candidates: [UInt32]? = nil,
                         isCancelled: @escaping @Sendable () -> Bool = { false }) -> [SearchMatch] {
         guard query.hasFuzzyTerms else {
-            return search(query, in: store, isCancelled: isCancelled).map { SearchMatch(id: $0, score: 0) }
+            return search(query, in: store, candidates: candidates, isCancelled: isCancelled).map { SearchMatch(id: $0, score: 0) }
         }
         let terms: [FuzzyTerm] = query.tokens.map { token in
             if token.isLiteral {
@@ -79,8 +80,8 @@ extension QueryEngine {
                 var out: [SearchMatch] = []
                 for i in lo..<hi {
                     if i & 1023 == 0 && isCancelled() { return [] }
-                    let id = UInt32(i)
-                    guard store.isLive(id) else { continue }
+                    let id = candidates?[i] ?? UInt32(i)
+                    guard Int(id) < store.count, store.isLive(id) else { continue }
                     if query.matchPath {
                         let path = store.path(of: id)
                         let value = Array(path.utf8).withUnsafeBufferPointer { name in
@@ -104,7 +105,7 @@ extension QueryEngine {
                 return out
             }
         }
-        let n = store.count
+        let n = candidates?.count ?? store.count
         if n < 100_000 { return isCancelled() ? [] : scan(0, n) }
         // Leave cores available for UI and filesystem work instead of saturating
         // every core with multiple superseded searches.
