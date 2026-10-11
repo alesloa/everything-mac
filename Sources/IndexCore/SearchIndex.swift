@@ -48,6 +48,13 @@ public final class SearchIndex: @unchecked Sendable {
         private enum Matches: Sendable {
             case exact([UInt32])
             case fuzzy([SearchMatch])
+
+            var ids: [UInt32] {
+                switch self {
+                case .exact(let ids): return ids
+                case .fuzzy(let matches): return matches.map(\.id)
+                }
+            }
         }
         let store: FileStore
         private let cacheLock = NSLock()
@@ -63,9 +70,12 @@ public final class SearchIndex: @unchecked Sendable {
             if let previous, previous.0 == query {
                 matches = previous.1
             } else {
+                // Cache complete matches, never the displayed top rows. Restrict
+                // only a provably narrower query, and recompute every fuzzy score.
+                let candidates = previous.flatMap { query.narrows($0.0) ? $0.1.ids : nil }
                 matches = query.hasFuzzyTerms
-                    ? .fuzzy(engine.matches(query, in: store, isCancelled: isCancelled))
-                    : .exact(engine.search(query, in: store, isCancelled: isCancelled))
+                    ? .fuzzy(engine.matches(query, in: store, candidates: candidates, isCancelled: isCancelled))
+                    : .exact(engine.search(query, in: store, candidates: candidates, isCancelled: isCancelled))
                 guard !isCancelled() else { return [] }
                 let old = cacheLock.withLock {
                     let old = cached
