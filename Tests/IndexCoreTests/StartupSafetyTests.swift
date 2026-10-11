@@ -393,12 +393,18 @@ private final class StorageScanBudget: @unchecked Sendable {
     let directory = try safetyDirectory(), fifo = directory.appendingPathComponent("index.idx")
     defer { try? FileManager.default.removeItem(at: directory) }
     #expect(mkfifo(fifo.path, 0o600) == 0)
-    let finished = DispatchSemaphore(value: 0)
-    DispatchQueue.global().async {
+    let started = DispatchSemaphore(value: 0), finished = DispatchSemaphore(value: 0)
+    // Queue starvation under parallel ASan tests is not a blocked FIFO open.
+    // Start the deadline after a dedicated worker begins the actual load.
+    Thread.detachNewThread {
+        started.signal()
         _ = try? IndexCache.load(from: fifo)
         finished.signal()
     }
-    let completedBeforeWriter = finished.wait(timeout: .now() + .milliseconds(200)) == .success
+    let workerStarted = started.wait(timeout: .now() + .seconds(5)) == .success
+    #expect(workerStarted)
+    // A blocking FIFO open cannot finish before a writer, even with this budget.
+    let completedBeforeWriter = workerStarted && finished.wait(timeout: .now() + .seconds(2)) == .success
     if !completedBeforeWriter {
         // Release the old blocking open for a bounded failing regression run.
         var writer: Int32 = -1
