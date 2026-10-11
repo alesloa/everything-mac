@@ -128,7 +128,11 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
             if Self.devFolderNames.contains(name) { return true }
             if inProjectDir && Self.markerScopedDevFolderNames.contains(name) { return true }
         }
-        for prefix in pathPrefixes where path.hasPrefix(prefix) { return true }
+        for rawPrefix in pathPrefixes {
+            var normalized = rawPrefix
+            while normalized.count > 1 && normalized.hasSuffix("/") { normalized.removeLast() }
+            if path == normalized || (normalized == "/" ? path.hasPrefix("/") : path.hasPrefix(normalized + "/")) { return true }
+        }
         return false
     }
 
@@ -149,13 +153,16 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
         return false
     }
 
-    /// Deterministic 64-bit fingerprint of the user-controllable rule fields (FNV-1a
+    /// Deterministic 64-bit fingerprint of the evaluation policy and rule fields (FNV-1a
     /// over a canonical encoding). Unlike Swift's per-run-seeded Hasher this is stable
     /// across launches, so the on-disk index cache can detect when the rules that
     /// shaped it no longer match the active rules and force a rebuild.
     public func fingerprint() -> UInt64 {
         var hash: UInt64 = 1469598103934665603 // FNV-1a offset basis
         func mix(_ s: String) { for b in s.utf8 { hash = (hash ^ UInt64(b)) &* 1099511628211 } }
+        // E2 uses directory component boundaries and normalizes trailing slashes.
+        // Prior fingerprints omitted this marker and may describe missing siblings.
+        mix("E2")
         mix(excludeHidden ? "H1" : "H0")
         mix(excludeDevFolders ? "D1" : "D0")
         mix(excludeVCSFolders ? "V1" : "V0")
@@ -163,7 +170,7 @@ public struct ExcludeRules: Sendable, Codable, Equatable {
         mix("N"); for n in names.sorted() { mix(n); mix("\u{1}") }
         mix("P"); for p in pathPrefixes { mix(p); mix("\u{1}") }
         mix("F"); for p in excludeFilePatterns { mix(p); mix("\u{1}") }
-        // Preserve existing cache fingerprints when no shares have been enabled.
+        // Share settings contribute only when shares have been enabled.
         if !networkShares.isEmpty {
             mix("S"); for s in networkShares { mix(s.source); mix("\u{1}") }
         }

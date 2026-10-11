@@ -67,18 +67,22 @@ public final class LiveMonitor: @unchecked Sendable {
         // This is what keeps live-update CPU flat under heavy filesystem churn.
         // Nanosecond precision, and nil on a dir's first event (so nothing is missed).
         var dst = stat()
-        let haveStat = stat(directory, &dst) == 0
+        let haveStat = lstat(directory, &dst) == 0
         let diskMtimeNs = haveStat
             ? Int64(dst.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(dst.st_mtimespec.tv_nsec) : 0
-        if haveStat, store.reconcileMtime(of: dirID) == diskMtimeNs { return false }
+        if haveStat, (dst.st_mode & S_IFMT) == S_IFDIR, store.reconcileMtime(of: dirID) == diskMtimeNs { return false }
 
         // Children of other volumes (a network share grafted under /Volumes) are
         // managed by their own scan, so only this volume's records are diffed away.
         let allChildren = store.childIDs(of: dirID)
         let existing = allChildren.filter { store.volID(of: $0) == volID }
 
-        guard let dir = opendir(directory) else {
-            // The directory itself is gone — tombstone whatever children remain.
+        guard let dir = Scanner.openDirectory(directory) else {
+            // Permission, TCC and transient I/O failures do not prove deletion.
+            // Preserve the last-known children and leave the mtime gate unset so
+            // a later successful listing can retry without a structural change.
+            let failure = errno
+            guard failure == ENOENT || failure == ENOTDIR || failure == ELOOP else { return false }
             var changed = false
             for id in existing { store.markSubtreeDeleted(id); changed = true }
             return changed
@@ -90,7 +94,13 @@ public final class LiveMonitor: @unchecked Sendable {
         // skipped only inside a project dir).
         var names: [String] = []
         var inProjectDir = false
-        while let e = readdir(dir) {
+        while true {
+            errno = 0
+            guard let e = readdir(dir) else {
+                // Never diff away entries using a failed/partial directory read.
+                if errno != 0 { return false }
+                break
+            }
             let name = withUnsafePointer(to: e.pointee.d_name) {
                 $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX)) { String(cString: $0) }
             }
@@ -99,41 +109,40 @@ public final class LiveMonitor: @unchecked Sendable {
             if ExcludeRules.projectMarkers.contains(name) { inProjectDir = true }
         }
 
-        // Live child names as a Set so the per-entry "is this new?" check below is O(1).
-        // childID(named:) is a linear scan that decodes a String per comparison, i.e.
-        // O(entries · children) per reconcile — quadratic, which pegged a core when a
-        // big, busy directory (a browser cache with thousands of files) reconciled on
-        // every add/remove. Building one Set makes the whole diff O(entries + children).
-        var existingNames = Set<String>(minimumCapacity: allChildren.count)
-        for id in allChildren { existingNames.insert(store.name(of: id)) }
-
+        // Keep local entries by name; grafted shares are never stat'ed here.
+        var existingByName: [String: [UInt32]] = [:]
+        for id in existing { existingByName[store.name(of: id), default: []].append(id) }
+        let foreignNames = Set(allChildren.filter { store.volID(of: $0) != volID }.map { store.name(of: $0) })
         var onDisk = Set<String>()
-        var changed = false
+        var changed = false, completed = true
         let nonLocalMounts = Set(MountTable.nonLocalMounts().map(\.path))
         for name in names {
             let full = (directory as NSString).appendingPathComponent(name)
             if rules.shouldExclude(name: name, path: full, isHidden: name.hasPrefix("."), inProjectDir: inProjectDir) { continue }
+            // Check before lstat: even stat'ing a stalled share can block.
+            if foreignNames.contains(name) || nonLocalMounts.contains(full) { onDisk.insert(name); continue }
+            var st = stat()
+            guard lstat(full, &st) == 0 else {
+                onDisk.insert(name); completed = false; continue
+            }
+            let isDir = (st.st_mode & S_IFMT) == S_IFDIR
+            if !isDir && rules.shouldExcludeFile(name: name) { continue }
             onDisk.insert(name)
-            if !existingNames.contains(name) {
-                // Check before lstat: even stat'ing a stalled share can block.
-                if nonLocalMounts.contains(full) { continue }
-                var st = stat()
-                guard lstat(full, &st) == 0 else { continue }
-                let isDir = (st.st_mode & S_IFMT) == S_IFDIR
-                // File-name exclude patterns apply to files only — a newly created
-                // file matching e.g. "*.tmp" must stay out of the live index too.
-                if !isDir && rules.shouldExcludeFile(name: name) { continue }
-                let newID = store.append(name: name, parent: dirID, size: UInt64(st.st_size),
-                                         mtime: Int64(st.st_mtimespec.tv_sec), isDir: isDir, volID: volID)
+            if let prior = existingByName[name] {
+                if prior.allSatisfy({ store.isDir(of: $0) == isDir }) { continue }
+                // A same-name replacement can change file ↔ directory/symlink.
+                // Replace its stable slot and tombstone old descendants before
+                // adding the new type; content-only changes still do no work.
+                for id in prior { store.markSubtreeDeleted(id) }
                 changed = true
-                // A newly-created directory can hold a whole subtree that FSEvents
-                // coalesced or reported out of parent-first order. Index it now so
-                // nested/bulk creation is never dropped, and record it so a sibling
-                // event for the same subtree this batch doesn't re-list it.
-                if isDir {
-                    Scanner(rules: rules).indexContents(of: full, under: newID, into: &store, volID: volID)
+            }
+            let newID = store.append(name: name, parent: dirID, size: UInt64(max(0, st.st_size)),
+                                     mtime: Int64(st.st_mtimespec.tv_sec), isDir: isDir, volID: volID)
+            changed = true
+            if isDir {
+                if Scanner(rules: rules).indexContents(of: full, under: newID, into: &store, volID: volID) {
                     newlyIndexedDirs.insert(full)
-                }
+                } else { completed = false }
             }
         }
         for id in existing where !onDisk.contains(store.name(of: id)) {
@@ -144,7 +153,7 @@ public final class LiveMonitor: @unchecked Sendable {
         }
         // Remember the mtime we just reconciled at so repeat events for this dir
         // (with the same mtime) take the cheap skip above instead of re-reading it.
-        if haveStat { store.setReconcileMtime(dirID, diskMtimeNs) }
+        if haveStat && completed { store.setReconcileMtime(dirID, diskMtimeNs) }
         return changed
     }
 

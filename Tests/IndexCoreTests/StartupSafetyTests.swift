@@ -174,3 +174,145 @@ private func awaitEvent(_ log: EventLog, in directory: URL) async throws -> Bool
         cursor += 8 + Int(originalCount) * stride
     }
 }
+
+@Test func storageReviewUnreadableDirectoryKeepsLastKnownChildren() throws {
+    let directory = try safetyDirectory()
+    defer {
+        chmod(directory.path, 0o700)
+        try? FileManager.default.removeItem(at: directory)
+    }
+    try Data([1]).write(to: directory.appendingPathComponent("cached.txt"))
+    var store = FileStore()
+    try Scanner(rules: ExcludeRules()).scan(rootPath: directory.path, into: &store, volID: 1)
+    let child = try #require(store.childID(named: "cached.txt", under: store.rootID))
+    #expect(chmod(directory.path, 0) == 0)
+    #expect(!LiveMonitor.reconcile(directory: directory.path, in: &store, rules: ExcludeRules(), volID: 1))
+    #expect(store.isLive(child))
+    #expect(store.reconcileMtime(of: store.rootID) == nil)
+}
+
+@Test func storageReviewDirectoryReplacedByFileDropsDescendantGhosts() throws {
+    let directory = try safetyDirectory(), replaced = directory.appendingPathComponent("same")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: replaced, withIntermediateDirectories: true)
+    try Data([1]).write(to: replaced.appendingPathComponent("old.txt"))
+    var store = FileStore()
+    try Scanner(rules: ExcludeRules()).scan(rootPath: directory.path, into: &store, volID: 1)
+    let priorDirectory = try #require(store.childID(named: "same", under: store.rootID))
+    let priorFile = try #require(store.childID(named: "old.txt", under: priorDirectory))
+    try FileManager.default.removeItem(at: replaced)
+    try Data([2]).write(to: replaced)
+    #expect(LiveMonitor.reconcile(directory: directory.path, in: &store, rules: ExcludeRules(), volID: 1))
+    let replacement = try #require(store.childID(named: "same", under: store.rootID))
+    #expect(!store.isDir(of: replacement))
+    #expect(!store.isLive(priorDirectory) && !store.isLive(priorFile))
+}
+
+@Test func storageReviewFileReplacedByDirectoryIndexesItsContents() throws {
+    let directory = try safetyDirectory(), replaced = directory.appendingPathComponent("same")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data([1]).write(to: replaced)
+    var store = FileStore()
+    try Scanner(rules: ExcludeRules()).scan(rootPath: directory.path, into: &store, volID: 1)
+    let priorFile = try #require(store.childID(named: "same", under: store.rootID))
+    try FileManager.default.removeItem(at: replaced)
+    try FileManager.default.createDirectory(at: replaced, withIntermediateDirectories: true)
+    try Data([2]).write(to: replaced.appendingPathComponent("new.txt"))
+    #expect(LiveMonitor.reconcile(directory: directory.path, in: &store, rules: ExcludeRules(), volID: 1))
+    let replacement = try #require(store.childID(named: "same", under: store.rootID))
+    #expect(store.isDir(of: replacement) && !store.isLive(priorFile))
+    #expect(store.childID(named: "new.txt", under: replacement) != nil)
+}
+
+@Test func storageReviewScopeLookupRejectsOutsidePrefixAndFileNodes() {
+    var store = FileStore()
+    let root = store.append(name: "/scoped/root", parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)
+    store.append(name: "-outside", parent: root, size: 0, mtime: 0, isDir: true, volID: 1)
+    store.append(name: "file.txt", parent: root, size: 1, mtime: 0, isDir: false, volID: 1)
+    #expect(store.idForDirPath("/scoped/root-outside") == nil)
+    #expect(store.idForDirPath("/scoped/root/file.txt") == nil)
+}
+
+@Test func storageReviewMissingScanRootDoesNotProduceUsableTree() throws {
+    let directory = try safetyDirectory(), missing = directory.appendingPathComponent("absent")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    var serial = FileStore()
+    #expect(throws: (any Error).self) {
+        try Scanner(rules: ExcludeRules()).scan(rootPath: missing.path, into: &serial, volID: 1)
+    }
+    #expect(serial.count == 0)
+    let parallel = ParallelScanner.scan(root: missing.path, rules: ExcludeRules(), volID: 2, workers: 2)
+    #expect(parallel.count == 0 && parallel.rootID == FileStore.noParent)
+}
+
+@Test func storageReviewExclusionsRespectDirectoryComponentBoundaries() {
+    let rules = ExcludeRules(pathPrefixes: ["/Volumes/share", "/tmp/private/"])
+    #expect(rules.shouldExclude(name: "inside", path: "/Volumes/share/inside", isHidden: false))
+    #expect(!rules.shouldExclude(name: "inside", path: "/Volumes/share-1/inside", isHidden: false))
+    #expect(rules.shouldExclude(name: "private", path: "/tmp/private", isHidden: false))
+}
+
+private final class StorageScanBudget: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: Int
+    init(_ remaining: Int) { self.remaining = remaining }
+    func isCancelled() -> Bool { lock.withLock { remaining -= 1; return remaining <= 0 } }
+}
+
+@Test func storageReviewCancelledScanReturnsNoPartialTree() throws {
+    let directory = try safetyDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    for i in 0..<16 {
+        let nested = directory.appendingPathComponent("nested-\(i)")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data([1]).write(to: nested.appendingPathComponent("entry.txt"))
+    }
+    let budget = StorageScanBudget(10)
+    let cancelled = ParallelScanner.scan(root: directory.path, rules: ExcludeRules(), volID: 1,
+                                          workers: 2, isCancelled: { budget.isCancelled() })
+    #expect(cancelled.count == 0 && cancelled.rootID == FileStore.noParent)
+    let completed = ParallelScanner.scan(root: directory.path + "///", rules: ExcludeRules(), volID: 1, workers: 2)
+    #expect(completed.scanCompleted && completed.count == 33)
+    #expect(completed.name(of: completed.rootID) == directory.path)
+}
+
+@Test func storageReviewPartialScanIsReportedAndSymlinksAreNotDescended() throws {
+    let directory = try safetyDirectory(), inaccessible = directory.appendingPathComponent("inaccessible")
+    defer {
+        chmod(inaccessible.path, 0o700)
+        try? FileManager.default.removeItem(at: directory)
+    }
+    try FileManager.default.createDirectory(at: inaccessible, withIntermediateDirectories: true)
+    try Data([1]).write(to: inaccessible.appendingPathComponent("hidden.txt"))
+    try FileManager.default.createSymbolicLink(at: directory.appendingPathComponent("loop"), withDestinationURL: directory)
+    #expect(chmod(inaccessible.path, 0) == 0)
+    let partial = ParallelScanner.scan(root: directory.path, rules: ExcludeRules(), volID: 2, workers: 2)
+    #expect(partial.count == 3 && !partial.scanCompleted)
+    let loop = try #require(partial.childID(named: "loop", under: partial.rootID))
+    #expect(!partial.isDir(of: loop))
+    let inaccessibleRoot = ParallelScanner.scan(root: inaccessible.path, rules: ExcludeRules(), volID: 2, workers: 2)
+    #expect(inaccessibleRoot.count == 0)
+}
+
+@Test func storageReviewDirectorySymlinkReplacementDoesNotIndexExternalTarget() throws {
+    let directory = try safetyDirectory(), outside = try safetyDirectory()
+    let replaced = directory.appendingPathComponent("same")
+    defer {
+        try? FileManager.default.removeItem(at: directory)
+        try? FileManager.default.removeItem(at: outside)
+    }
+    try FileManager.default.createDirectory(at: replaced, withIntermediateDirectories: true)
+    try Data([1]).write(to: replaced.appendingPathComponent("old.txt"))
+    try Data([2]).write(to: outside.appendingPathComponent("external.txt"))
+    var store = FileStore()
+    try Scanner(rules: ExcludeRules()).scan(rootPath: directory.path, into: &store, volID: 1)
+    try FileManager.default.removeItem(at: replaced)
+    try FileManager.default.createSymbolicLink(at: replaced, withDestinationURL: outside)
+    // A descendant event can arrive before the parent's type-replacement event.
+    LiveMonitor.reconcile(directory: replaced.path, in: &store, rules: ExcludeRules(), volID: 1)
+    #expect(!(0..<store.count).contains { store.name(of: UInt32($0)) == "external.txt" })
+    LiveMonitor.reconcile(directory: directory.path, in: &store, rules: ExcludeRules(), volID: 1)
+    let current = try #require(store.childID(named: "same", under: store.rootID))
+    #expect(!store.isDir(of: current))
+    #expect(store.childIDs(of: current).isEmpty)
+}
