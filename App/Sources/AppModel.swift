@@ -8,7 +8,7 @@ final class AppModel: ObservableObject {
     @Published var query = ""
     @Published var results: [FileRecord] = [] {
         didSet {
-            if let id = selectedID, results.first(where: { $0.id == id })?.path != selectedPath {
+            if selectedID != nil && selected == nil {
                 selectedID = nil
             }
         }
@@ -42,7 +42,8 @@ final class AppModel: ObservableObject {
     // IDs are stable within one store, but a rebuild can reuse them. Resolve both
     // ID and path so selection-dependent commands retain the same file target.
     var selected: FileRecord? {
-        selectedID.flatMap { id in results.first { $0.id == id && $0.path == selectedPath } }
+        guard let id = selectedID, let path = selectedPath else { return nil }
+        return results.first { $0.id == id && $0.path.utf8.elementsEqual(path.utf8) }
     }
 
     let index: IndexActor

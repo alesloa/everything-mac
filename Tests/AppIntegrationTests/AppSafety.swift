@@ -35,6 +35,15 @@ import IndexCore
         model.results = [second]
         precondition(model.selected == nil)
 
+        let composed = record(9, "/fixture/caf\u{E9}.txt")
+        let decomposed = record(9, "/fixture/cafe\u{301}.txt")
+        precondition(!composed.path.utf8.elementsEqual(decomposed.path.utf8))
+        model.results = [composed]
+        model.selectedID = composed.id
+        model.results = [decomposed]
+        precondition(model.selectedID == nil && model.selected == nil,
+                     "Canonically equivalent path text redirected actions to different path bytes")
+
         func tableView(_ rows: [FileRecord]) -> ResultsTable {
             ResultsTable(rows: rows, onSort: { _, _ in }, onSelect: { _ in }, onActivate: { _ in })
         }
@@ -64,6 +73,11 @@ import IndexCore
         table.simulatedClickedRow = -1
         coordinator.menuNeedsUpdate(menu)
         precondition(coordinator.clickedRecord() == nil)
+
+        coordinator.reload(tableView([composed]))
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        coordinator.reload(tableView([decomposed]))
+        precondition(table.selectedRow == -1, "Selection survived replacement by different Unicode path bytes")
 
         let unusual = record(7, "/fixture/tab\tline\n\"quoted\".txt")
         let exported = ResultActions.exportedTSV([unusual])

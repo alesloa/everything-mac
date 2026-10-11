@@ -82,7 +82,9 @@ struct ResultsTable: NSViewRepresentable {
             suppressSelectionCallback = true
             defer { suppressSelectionCallback = false }
             table?.reloadData()
-            if let selected, let row = parent.rows.firstIndex(where: { $0.id == selected.id && $0.path == selected.path }) {
+            if let selected, let row = parent.rows.firstIndex(where: {
+                $0.id == selected.id && $0.path.utf8.elementsEqual(selected.path.utf8)
+            }) {
                 table?.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             } else {
                 // Rebuilds reuse numeric IDs. Never keep the highlight on a new
