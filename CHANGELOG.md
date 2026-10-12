@@ -10,7 +10,8 @@ All notable changes to EverythingMac are recorded here. The format is based on
 - The startup drive can be turned off in Settings > Volumes while enabled external drives and selected network shares remain searchable.
 - Startup-drive choices persist and invalidate the appropriate index cache; toggling the startup drive retains cached files from offline network shares.
 - Closing the folder sidebar clears its location restriction and returns the tab to all indexed folders, retaining the query, filters, and sorting.
-- Restored folder searches show the sidebar, and a close button explains how to return to all indexed folders.
+- A permanent sidebar toggle beside the search field expands or collapses folders from the same place, with Control-Command-S as a shortcut.
+- Restored folder searches show the sidebar so their selected location remains visible.
 
 ## [0.5.1] - 2026-10-11
 

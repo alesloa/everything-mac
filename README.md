@@ -151,7 +151,7 @@ Quoted words use literal matching. Boolean groups, metadata predicates, and sear
 
 Open **Filters** beside the search field to select multiple file types and optional **Over** and **Under** size limits, then click **Apply**. **Everything** checks or clears the type group; each type stays independently selectable, and Files includes every file type. Selected types form a union; size limits narrow that union to files strictly above or below the entered sizes. Choose MB or GB for decimal units, and use **Clear All**, then **Apply**, to remove filters while keeping the search text. Filters are retained in saved searches and tabs.
 
-Use **View > Folder Sidebar** to limit the current tab to a drive or folder. Close the sidebar with its close button or the View menu to search all indexed folders again. The search text, type and size filters, and sorting remain in place. Opening a saved search with a folder restriction shows the sidebar so its selected location is visible.
+Use the sidebar button beside the search field, **View > Folder Sidebar**, or **Control-Command-S** to expand or collapse folders. Select a drive or folder to limit the current tab; collapsing the sidebar searches all indexed folders again. The search text, type and size filters, and sorting remain in place. Opening a saved search with a folder restriction shows the sidebar so its selected location is visible.
 
 ### Previews, totals, and file tools
 

@@ -19,7 +19,7 @@ struct SearchResultsArea: View {
         HSplitView {
             if model.folderSidebarVisible {
                 FolderSidebarView(snapshot: folders.snapshot, selectedScope: model.folderScope,
-                                  onSelect: model.setFolderScope, onClose: { model.setFolderSidebarVisible(false) })
+                                  onSelect: model.setFolderScope)
             }
             VStack(spacing: 0) {
                 if let scope = model.folderScope {
