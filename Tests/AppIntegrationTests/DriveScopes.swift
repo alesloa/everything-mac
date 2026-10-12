@@ -18,7 +18,7 @@ private final class DriveMountFixture: @unchecked Sendable {
         Task { @MainActor in
             do {
                 try await run()
-                print("PASS: startup disk toggles preserve external/offline network files; closing the sidebar clears and persists its scope")
+                print("PASS: startup disk toggles preserve external/offline network files; sidebar clicks retain scoped results across tabs and session restoration")
                 exit(EXIT_SUCCESS)
             } catch {
                 print("FAIL: \(error.localizedDescription)"); exit(EXIT_FAILURE)
@@ -114,29 +114,42 @@ private final class DriveMountFixture: @unchecked Sendable {
         second.workspace.activate(defaultState: SearchWorkspaceState())
         second.query = "item.txt"
         second.setFolderScope(FolderScope(path: sharePath))
+        let scopedSnapshot = model.resultSnapshotID
         model.setFolderSidebarVisible(false)
-        try await waitUntil { model.totalMatches == 3 }
-        try require(model.folderScope == nil && !model.folderSidebarVisible,
-                    "Closing the sidebar left an active folder restriction")
+        try require(model.folderScope?.path == externalPath && !model.folderSidebarVisible
+                    && model.totalMatches == 1 && model.resultSnapshotID == scopedSnapshot,
+                    "Collapsing the sidebar changed its selected drive or current results")
         try require(model.query == "item.txt" && model.searchFilters.selectedTypes == [.files]
                     && model.sortKey == .size && !model.ascending, "Closing sidebar changed unrelated search choices")
         try require(second.folderScope?.path == sharePath && second.folderSidebarVisible,
                     "Closing one sidebar changed another window")
         let windowID = model.workspace.window.id
         let restored = WorkspaceLibrary(preferences: preferences)
-        try require(restored.archive.windows.first { $0.id == windowID }?.selectedTab.state.folderScopePath == nil,
-                    "Closed sidebar scope returned after session reload")
+        let restoredState = restored.archive.windows.first { $0.id == windowID }?.selectedTab.state
+        try require(restoredState?.folderScopePath == externalPath && restoredState?.folderSidebarVisible == false,
+                    "Collapsed sidebar selection or visibility was lost after session reload")
+        let restoredModel = AppModel(index: index, preferences: preferences,
+            workspace: SearchWorkspaceController(library: restored, windowID: windowID.uuidString))
+        restoredModel.restoreWorkspace()
+        await restoredModel.runSearch()
+        try require(restoredModel.folderScope?.path == externalPath && !restoredModel.folderSidebarVisible
+                    && restoredModel.totalMatches == 1, "Restoring a session changed the collapsed drive search")
         model.setFolderSidebarVisible(true)
-        try require(model.folderScope == nil, "Reopening the sidebar restored a forgotten restriction")
+        try require(model.folderScope?.path == externalPath, "Expanding the sidebar lost its selected drive")
+        var collapsed = saved.state
+        collapsed.folderSidebarVisible = false
+        model.applyWorkspace(collapsed)
+        try require(model.folderScope?.path == externalPath && !model.folderSidebarVisible,
+                    "Restoring a collapsed scoped search expanded it")
         var legacy = saved.state
-        legacy.folderSidebarVisible = false
+        legacy.folderSidebarVisible = nil
         model.applyWorkspace(legacy)
         try require(model.folderScope?.path == externalPath && model.folderSidebarVisible,
-                    "Restoring an older scoped search hid its restriction")
+                    "An older scoped search without a visibility setting did not start expanded")
         model.setFolderSidebarVisible(false)
         model.newSearchTab(); model.closeSearchTab()
-        try require(model.folderScope == nil && !model.folderSidebarVisible,
-                    "Tab switching restored a cleared folder restriction")
+        try require(model.folderScope?.path == externalPath && !model.folderSidebarVisible,
+                    "Tab switching lost the selected drive or expanded its sidebar")
         model.openSavedSearch(saved)
         try require(model.folderScope?.path == externalPath && model.folderSidebarVisible,
                     "Opening an explicit saved drive search discarded or hid its location")
@@ -145,7 +158,14 @@ private final class DriveMountFixture: @unchecked Sendable {
         try require(model.workspaceSnapshot.customFilterID == custom.id, "Saved custom filter selection was discarded")
         model.applySavedFilter(nil)
         try require(model.workspaceSnapshot.customFilterID == nil, "Saved custom filter could not be cleared")
+        try await waitUntil { model.totalMatches == 1 }
         try await verifySidebarToggle(model)
+        model.setFolderScope(nil)
+        try await waitUntil { model.totalMatches == 3 }
+        try require(model.folderScope == nil && model.folderSidebarVisible,
+                    "All Indexed Folders did not explicitly clear the selected drive")
+        try require(second.folderScope?.path == sharePath && second.folderSidebarVisible,
+                    "Clearing a drive search changed another window")
         edit.indexBootVolume = false
         try await capture(NSHostingView(rootView: VolumesSettingsView(edit: edit, apply: {}).environmentObject(model)),
                           size: NSSize(width: 540, height: 480), path: "/tmp/everything-drive-settings.png")
@@ -162,8 +182,13 @@ private final class DriveMountFixture: @unchecked Sendable {
         guard let expanded = sidebarToggle(in: view) else { throw failure("Expanded sidebar toggle is missing") }
         let frame = expanded.convert(expanded.bounds, to: nil)
         try require(expanded.state == .on, "Expanded toggle does not reflect the open sidebar")
+        let selectedPath = model.folderScope?.path
+        let scopedSnapshot = model.resultSnapshotID
+        try require(selectedPath != nil && model.totalMatches == 1, "Sidebar click fixture has no selected drive")
         expanded.performClick(nil)
-        try await waitUntil { !model.folderSidebarVisible && model.folderScope == nil && model.totalMatches == 3 }
+        try await waitUntil { !model.folderSidebarVisible }
+        try require(model.folderScope?.path == selectedPath && model.totalMatches == 1
+                    && model.resultSnapshotID == scopedSnapshot, "Native collapse click changed the search")
         view.layoutSubtreeIfNeeded()
         guard let collapsed = sidebarToggle(in: view) else { throw failure("Collapsed sidebar toggle disappeared") }
         let collapsedFrame = collapsed.convert(collapsed.bounds, to: nil)
@@ -173,7 +198,8 @@ private final class DriveMountFixture: @unchecked Sendable {
         try await screenshot(window, path: "/tmp/everything-drive-toggle-collapsed.png")
         collapsed.performClick(nil)
         try await waitUntil { model.folderSidebarVisible }
-        try require(model.folderScope == nil && model.query == "item.txt", "Expanding restored a forgotten folder or erased the query")
+        try require(model.folderScope?.path == selectedPath && model.query == "item.txt" && model.totalMatches == 1,
+                    "Native expand click changed the selected drive or query")
         try await screenshot(window, path: "/tmp/everything-drive-toggle-expanded.png")
     }
 
