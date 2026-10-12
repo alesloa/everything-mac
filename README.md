@@ -2,7 +2,7 @@
 
 Search files and folders across your disks as you type. Normal searches match consecutive text: `expo` finds `export.swift`. Optional fuzzy matching finds abbreviated names and tolerates a single letter typo in longer terms. It's a macOS clone of [Everything](https://www.voidtools.com/), the search tool I lived in back on Windows.
 
-![EverythingMac searching across 8.2 million files](assets/screenshot.png)
+![EverythingMac searching for mac on indexed volumes](assets/screenshot.png)
 
 **[Download the latest release](https://github.com/alesloa/everything-mac/releases/latest)** (macOS 14+), or [build it from source](#build-and-run).
 
