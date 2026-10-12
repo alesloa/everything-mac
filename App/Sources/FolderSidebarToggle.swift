@@ -26,7 +26,7 @@ struct FolderSidebarToggle: NSViewRepresentable {
         button.state = model.folderSidebarVisible ? .on : .off
         button.contentTintColor = model.folderSidebarVisible ? .controlAccentColor : .secondaryLabelColor
         button.setAccessibilityLabel(model.folderSidebarVisible ? "Collapse folder sidebar" : "Expand folder sidebar")
-        button.toolTip = model.folderSidebarVisible ? "Collapse folders and search all indexed folders" : "Expand folders"
+        button.toolTip = model.folderSidebarVisible ? "Collapse folders" : "Expand folders"
     }
 
     @MainActor final class Coordinator: NSObject {

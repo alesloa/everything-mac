@@ -4,6 +4,13 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [0.5.3] - 2026-10-11
+
+### Fixed
+- Collapsing the folder sidebar keeps the selected drive or folder and leaves the current search results in place.
+- Tabs, saved searches, and restored sessions retain both the selected location and the sidebar's expanded or collapsed state.
+- All Indexed Folders and the selected-path clear button explicitly return the search to the entire index.
+
 ## [0.5.2] - 2026-10-11
 
 ### Fixed
@@ -113,6 +120,7 @@ All notable changes to EverythingMac are recorded here. The format is based on
 ### Added
 - First public release. Instant filename and folder search across every mounted volume, updating as you type. FSEvents-backed live index, a binary on-disk cache for instant restarts, and right-click actions (Open, Open With, Reveal in Finder, Copy Path/Name, Move to Trash).
 
+[0.5.3]: https://github.com/alesloa/everything-mac/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/alesloa/everything-mac/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/alesloa/everything-mac/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/alesloa/everything-mac/compare/v0.3.0...v0.5.0

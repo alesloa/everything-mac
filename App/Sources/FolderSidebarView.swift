@@ -32,8 +32,8 @@ struct FolderSidebarView: View {
                     }
                 }
             }
-            // Source: AppModel.setFolderSidebarVisible clears the location scope.
-            Text("Collapsing this sidebar searches all indexed folders.")
+            // Source: the owner's requested retained selection and onSelect(nil) above.
+            Text("Choose All Indexed Folders to search everywhere.")
                 .font(.caption).foregroundStyle(.secondary).padding(10)
         }
         .frame(minWidth: 180, idealWidth: 230, maxWidth: 320)
