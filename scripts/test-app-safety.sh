@@ -13,7 +13,7 @@ done < <(rg --files App/Sources -g '*.swift' | sort)
 app_test_sources=(Tests/AppIntegrationTests/AppSafety.swift
     Tests/AppIntegrationTests/ScanLifecycle.swift Tests/AppIntegrationTests/TableSafety.swift
     Tests/AppIntegrationTests/WindowIsolation.swift Tests/AppIntegrationTests/SidebarLayout.swift
-    Tests/AppIntegrationTests/FolderMultiselect.swift)
+    Tests/AppIntegrationTests/FolderMultiselect.swift Tests/AppIntegrationTests/FolderSidebarRefresh.swift)
 if [[ "$#" -gt 0 ]]; then app_test_sources=("$@"); fi
 for app_test_source in "${app_test_sources[@]}"; do
     app_test_binary="$app_test_dir/$(basename "$app_test_source" .swift)"

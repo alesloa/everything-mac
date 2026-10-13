@@ -21,6 +21,10 @@ import IndexCore
         task = Task { [weak self, index, loadSnapshot] in
             let next = await loadSnapshot(index)
             guard !Task.isCancelled, let self, self.request == request else { return }
+            // A publication can cancel folder preparation before this request
+            // returns. Keep the last successful tree until a new one is ready.
+            guard let next else { return }
+            guard self.snapshot?.snapshotID != next.snapshotID || self.snapshot?.revision != next.revision else { return }
             self.snapshot = next
         }
     }
