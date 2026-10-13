@@ -4,6 +4,13 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [0.6.1] - 2026-10-13
+
+### Fixed
+- Keep selected folder rows and scroll position stable during background file updates instead of rebuilding an unchanged visible folder tree.
+- Retain the last loaded folder tree when a newer publication cancels folder preparation, and skip repeated snapshot notifications.
+- Keep collapsed selected branches closed during background refreshes, and restore selected descendant highlights when explicitly reopened.
+
 ## [0.6.0] - 2026-10-13
 
 ### Added
@@ -134,6 +141,7 @@ All notable changes to EverythingMac are recorded here. The format is based on
 ### Added
 - First public release. Instant filename and folder search across every mounted volume, updating as you type. FSEvents-backed live index, a binary on-disk cache for instant restarts, and right-click actions (Open, Open With, Reveal in Finder, Copy Path/Name, Move to Trash).
 
+[0.6.1]: https://github.com/alesloa/everything-mac/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/alesloa/everything-mac/compare/v0.5.4...v0.6.0
 [0.5.4]: https://github.com/alesloa/everything-mac/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/alesloa/everything-mac/compare/v0.5.2...v0.5.3

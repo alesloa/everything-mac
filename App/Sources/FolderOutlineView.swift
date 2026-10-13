@@ -8,7 +8,7 @@ import IndexCore
 }
 
 @MainActor final class FolderOutlineItem: NSObject {
-    let record: FileRecord
+    var record: FileRecord
     var children: [FolderOutlineItem]?
     init(_ record: FileRecord) { self.record = record }
 }
@@ -113,19 +113,28 @@ struct FolderOutlineView: NSViewRepresentable {
         func reload(_ next: FolderOutlineView) {
             let changedSnapshot = loadedSnapshot != next.snapshot?.snapshotID || loadedRevision != next.snapshot?.revision
             let changedSelection = acceptedSelection != next.selection
+            let changedExclusions = (acceptedSelection?.excluded.map { Array($0.path.utf8) } ?? [])
+                != (next.selection?.excluded.map { Array($0.path.utf8) } ?? [])
+            let previousSnapshot = parent.snapshot
             parent = next
             guard let table else { return }
             table.suppressSelection += 1
             defer { table.suppressSelection -= 1 }
+            var rebuilt = false
             if changedSnapshot {
                 loadedSnapshot = next.snapshot?.snapshotID
                 loadedRevision = next.snapshot?.revision
-                nodes = [:]
-                roots = next.snapshot?.roots.compactMap { makeNode($0) } ?? []
-                table.reloadData()
-                restoreExpansions(roots)
+                // Most publications change files below the tree's visible
+                // branches. Keep AppKit's selected items and cells in place.
+                if next.snapshot.map({ refreshUnchangedHierarchy($0, previous: previousSnapshot, table: table) }) != true {
+                    nodes = [:]
+                    roots = next.snapshot?.roots.compactMap { makeNode($0) } ?? []
+                    table.reloadData()
+                    restoreExpansions(roots)
+                    rebuilt = true
+                }
             }
-            if changedSnapshot || changedSelection {
+            if rebuilt || changedSelection {
                 acceptedSelection = next.selection
                 // A selected path may be absent while a mounted/offline root is
                 // refreshing. Only restore rows; never rewrite the model here.
@@ -134,15 +143,51 @@ struct FolderOutlineView: NSViewRepresentable {
                     let row = table.row(forItem: item)
                     return row >= 0 ? row : nil
                 })
-                table.selectRowIndexes(indexes, byExtendingSelection: false)
+                if indexes != table.selectedRowIndexes {
+                    table.selectRowIndexes(indexes, byExtendingSelection: false)
+                }
+            }
+            if changedExclusions && !rebuilt {
                 let visible = IndexSet(integersIn: 0..<table.numberOfRows)
                 table.reloadData(forRowIndexes: visible, columnIndexes: IndexSet(integer: 0))
             }
         }
 
+        private func refreshUnchangedHierarchy(_ snapshot: FolderSnapshot, previous: FolderSnapshot?,
+                                               table: FolderOutlineTable) -> Bool {
+            guard roots.map({ $0.record.id }) == snapshot.roots else { return false }
+            var updates: [(FolderOutlineItem, FileRecord)] = []
+            var expanded: Set<ObjectIdentifier> = []
+            var changedHiddenBranches: [FolderOutlineItem] = []
+            for row in 0..<table.numberOfRows {
+                guard let item = table.item(atRow: row) as? FolderOutlineItem,
+                      let record = snapshot.record(for: item.record.id),
+                      record.parent == item.record.parent,
+                      record.path.utf8.elementsEqual(item.record.path.utf8) else { return false }
+                if table.isItemExpanded(item) {
+                    guard item.children?.map({ $0.record.id }) == snapshot.children(of: record.id) else { return false }
+                    expanded.insert(ObjectIdentifier(item))
+                } else if previous?.children(of: record.id) != snapshot.children(of: record.id) {
+                    changedHiddenBranches.append(item)
+                }
+                updates.append((item, record))
+            }
+            // Hidden branches are rebuilt lazily when opened, using the new
+            // snapshot. Only verified expanded child lists keep their cache.
+            for node in nodes.values where !expanded.contains(ObjectIdentifier(node)) { node.children = nil }
+            for (item, record) in updates { item.record = record }
+            // AppKit caches collapsed child lists as well. Refresh only the
+            // branches that actually changed, retaining the other row cells.
+            for item in changedHiddenBranches { table.reloadItem(item, reloadChildren: true) }
+            return true
+        }
+
         private func makeNode(_ id: UInt32) -> FolderOutlineItem? {
-            if let existing = nodes[id] { return existing }
             guard let record = parent.snapshot?.record(for: id) else { return nil }
+            if let existing = nodes[id], existing.record.path.utf8.elementsEqual(record.path.utf8) {
+                existing.record = record
+                return existing
+            }
             let node = FolderOutlineItem(record)
             nodes[id] = node
             return node
@@ -251,6 +296,17 @@ struct FolderOutlineView: NSViewRepresentable {
         func outlineViewItemDidExpand(_ notification: Notification) {
             guard let item = notification.userInfo?["NSObject"] as? FolderOutlineItem else { return }
             parent.state.expandedPaths.insert(Array(item.record.path.utf8))
+            guard let table, table.suppressSelection == 0 else { return }
+            // AppKit may drop a hidden descendant's row selection on collapse;
+            // restore only rows already revealed by this explicit expansion.
+            table.suppressSelection += 1
+            defer { table.suppressSelection -= 1 }
+            let selected = acceptedSelection?.included.compactMap { pathChain($0.path)?.last } ?? []
+            let indexes = IndexSet(selected.compactMap { node in
+                let row = table.row(forItem: node)
+                return row >= 0 ? row : nil
+            })
+            if indexes != table.selectedRowIndexes { table.selectRowIndexes(indexes, byExtendingSelection: false) }
         }
 
         func outlineViewItemWillCollapse(_ notification: Notification) { collapsing += 1 }
