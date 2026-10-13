@@ -3,6 +3,47 @@ import Testing
 @testable import IndexCore
 
 @Suite struct SearchWorkspaceTests {
+    @Test func folderSelectionRoundTripsPathsAndRestoresLegacySingleFolder() throws {
+        var legacy = SearchWorkspaceState()
+        legacy.folderScopePath = "/Users"
+        let legacyData = try JSONEncoder().encode(legacy)
+        #expect(!String(decoding: legacyData, as: UTF8.self).contains("folderScopePaths"))
+        #expect(try JSONDecoder().decode(SearchWorkspaceState.self, from: legacyData)
+            .effectiveFolderSearchScope == FolderSearchScope(included: [FolderScope(path: "/Users")]))
+        legacy.excludedFolderScopePaths = ["/Users/Cache"]
+        #expect(legacy.effectiveFolderSearchScope == FolderSearchScope(included: [FolderScope(path: "/Users")],
+            excluded: [FolderScope(path: "/Users/Cache")]))
+
+        var selected = SearchWorkspaceState()
+        selected.folderScopePaths = ["/Users", "/Projects"]
+        selected.excludedFolderScopePaths = ["/Users/Cache", "/Volumes"]
+        selected.folderSidebarVisible = false
+        #expect(selected.hasSearch)
+        var window = SearchWindowState(state: selected)
+        window.update(selected, record: true)
+        var archive = SearchWorkspaceArchive()
+        archive.windows = [window]
+        archive.savedSearches = [SavedSearch(name: "Local folders", state: selected)]
+        archive.record(selected)
+        let encoded = try SearchWorkspaceStore.encode(archive)
+        let restored = try SearchWorkspaceStore.decode(encoded)
+        #expect(restored == archive)
+        let scope = restored.windows[0].selectedTab.state.effectiveFolderSearchScope
+        #expect(scope?.included.map(\.path) == ["/Users", "/Projects"])
+        #expect(scope?.excluded.map(\.path) == ["/Users/Cache", "/Volumes"])
+        #expect(scope?.included.allSatisfy { $0.id == nil } == true)
+        #expect(scope?.excluded.allSatisfy { $0.id == nil } == true)
+        #expect(restored.windows[0].selectedTab.state.folderSidebarVisible == false)
+
+        // Explicit new fields supersede a stale legacy path, including a cleared
+        // selection and exclusions-only "all except" searches.
+        selected.folderScopePath = "/stale"
+        selected.folderScopePaths = []; selected.excludedFolderScopePaths = []
+        #expect(selected.effectiveFolderSearchScope == nil && !selected.hasSearch)
+        selected.excludedFolderScopePaths = ["/Volumes"]
+        #expect(selected.hasSearch && selected.effectiveFolderSearchScope?.included.isEmpty == true)
+    }
+
     @Test func plainSearchMatchesConsecutiveTextAndFuzzyRequiresOptIn() async {
         var store = FileStore()
         let root = store.append(name: "/fixture", parent: FileStore.noParent, size: 0, mtime: 0, isDir: true, volID: 1)

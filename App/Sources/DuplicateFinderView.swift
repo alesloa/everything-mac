@@ -7,6 +7,7 @@ struct DuplicateFinderView: View {
     let query: Query?
     let selectedPaths: [String]
     var folderPath: String? = nil
+    var folderSelection: FolderSearchScope? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var model = DuplicateFinderModel()
     @State private var scope: Scope = .query
@@ -39,7 +40,9 @@ struct DuplicateFinderView: View {
                 }
                 Text("Uses every matching file in the captured index snapshot.")
                     .font(.caption).foregroundStyle(.secondary)
-                if let folderPath { Text(folderPath).font(.caption).textSelection(.enabled) }
+                if let folderSelection {
+                    FolderSearchScopeDetails(selection: folderSelection)
+                } else if let folderPath { Text(folderPath).font(.caption).textSelection(.enabled) }
             } else {
                 folderPicker("Folder", path: $folder)
                 if scope == .comparison { folderPicker("Compare with", path: $otherFolder) }
@@ -83,6 +86,14 @@ struct DuplicateFinderView: View {
         case .folder: folder != nil
         case .comparison: folder != nil && otherFolder != nil
         }
+    }
+
+    var capturedQueryScope: DuplicateScope? {
+        guard let query, query.validationError == nil else { return nil }
+        if let folderSelection {
+            return .scopedQuery(snapshot: index.readSnapshot(), query: query, folderSelection: folderSelection)
+        }
+        return .query(snapshot: index.readSnapshot(), query: query, folderPath: folderPath)
     }
 
     private func folderPicker(_ label: String, path: Binding<String?>) -> some View {
@@ -192,8 +203,8 @@ struct DuplicateFinderView: View {
         switch scope {
         case .selection: model.find(.paths(selectedPaths), method: check, options: options)
         case .query:
-            guard let query, query.validationError == nil else { return }
-            model.find(.query(snapshot: index.readSnapshot(), query: query, folderPath: folderPath), method: check, options: options)
+            guard let capturedQueryScope else { return }
+            model.find(capturedQueryScope, method: check, options: options)
         case .folder:
             guard let folder else { return }
             model.find(.folder(folder), method: check, options: options)

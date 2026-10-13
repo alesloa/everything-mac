@@ -90,7 +90,7 @@ struct ContentView: View {
                 case .success(let query):
                     NativeResultsExportView(index: model.index.searchIndex, query: query,
                         selected: model.actionRecords, shown: model.visibleResults,
-                        sort: model.sortKey, ascending: model.ascending, folderPath: model.folderScope?.path,
+                        sort: model.sortKey, ascending: model.ascending, folderSelection: model.folderSearchScope,
                         selection: model.rowSelection)
                 case .failure(let error): featureError(error)
                 }
@@ -98,13 +98,13 @@ struct ContentView: View {
                 if case .failure(let error) = model.featureQueryResult { featureError(error) }
                 DuplicateFinderView(index: model.index.searchIndex,
                     query: try? model.featureQueryResult.get(), selectedPaths: (model.panelRecords ?? model.actionRecords).map(\.path),
-                    folderPath: model.folderScope?.path)
+                    folderSelection: model.folderSearchScope)
             case .contentSearch:
                 switch model.featureQueryResult {
                 case .success(let query):
                     ContentSearchView(index: model.index.searchIndex,
                         query: query, selectedPaths: (model.panelRecords ?? model.actionRecords).map(\.path),
-                        folderPath: model.folderScope?.path)
+                        folderSelection: model.folderSearchScope)
                 case .failure(let error): featureError(error)
                 }
             case .activity: IndexActivityView(index: model.index)

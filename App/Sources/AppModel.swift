@@ -37,7 +37,7 @@ final class AppModel: ObservableObject {
         let query: Query
         let sort: QueryEngine.SortKey
         let ascending: Bool
-        let scope: FolderScope?
+        let scope: FolderSearchScope?
     }
     private var displayedSearch: DisplayedSearch?
     var panelRecords: [FileRecord]?
@@ -74,7 +74,16 @@ final class AppModel: ObservableObject {
     @Published var previewVisible = false
     @Published var thumbnailView = false
     @Published var previewAllowsNetwork = false
-    @Published var folderScope: FolderScope?
+    @Published var folderSearchScope: FolderSearchScope?
+    // Legacy callers can still read/set one included folder. Multi-folder and
+    // excluded-folder restrictions must use folderSearchScope in full.
+    var folderScope: FolderScope? {
+        get {
+            guard let scope = folderSearchScope, scope.included.count == 1, scope.excluded.isEmpty else { return nil }
+            return scope.included.first
+        }
+        set { folderSearchScope = newValue.map { FolderSearchScope(included: [$0]) } }
+    }
     @Published var folderSidebarVisible = false
     @Published var indexedFolderTotals = false
     @Published var indexedTotalsColumnOverride: Bool?
@@ -347,11 +356,11 @@ final class AppModel: ObservableObject {
             return
         }
         searchError = nil
-        let sort = sortKey, ascending = ascending, scope = folderScope
+        let sort = sortKey, ascending = ascending, scope = folderSearchScope
         let presentation = DisplayedSearch(query: query, sort: sort, ascending: ascending, scope: scope)
         let worker = Task {
             await index.searchIndex.searchReport(query, sort: sort, ascending: ascending,
-                                                 limit: 5000, scope: scope, includeAllResults: true)
+                                                 limit: 5000, folderSelection: scope, includeAllResults: true)
         }
         searchTask = worker
         let r = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
@@ -445,8 +454,15 @@ final class AppModel: ObservableObject {
     }
 
     func setFolderScope(_ scope: FolderScope?) {
-        folderScope = scope
-        if scope != nil { folderSidebarVisible = true; refreshFolderDetailsIfNeeded() }
+        setFolderSearchScope(scope.map { FolderSearchScope(included: [$0]) })
+    }
+
+    func setFolderSearchScope(_ scope: FolderSearchScope?, revealSidebar: Bool = true) {
+        folderSearchScope = scope.flatMap {
+            $0.included.isEmpty && $0.excluded.isEmpty ? nil
+                : FolderSearchScope(included: $0.included, excluded: $0.excluded)
+        }
+        if folderSearchScope != nil && revealSidebar { folderSidebarVisible = true; refreshFolderDetailsIfNeeded() }
         workspaceStateChanged()
         Task { await runSearch() }
     }

@@ -138,9 +138,11 @@ private struct WorkspaceStateOptions: View {
                 set: { state.folderSidebarVisible = $0 }))
             Toggle("Show indexed folder totals", isOn: Binding(get: { state.indexedFolderTotals ?? false },
                 set: { state.indexedFolderTotals = $0 }))
-            if let path = state.folderScopePath {
-                LabeledContent("Folder scope", value: path)
-                Button("Clear folder scope") { state.folderScopePath = nil }
+            if let scope = state.effectiveFolderSearchScope {
+                FolderSearchScopeDetails(selection: scope)
+                Button("Clear folder selection") {
+                    state.folderScopePath = nil; state.folderScopePaths = nil; state.excludedFolderScopePaths = nil
+                }
             }
         }
     }
