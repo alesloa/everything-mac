@@ -4,6 +4,12 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [0.5.4] - 2026-10-13
+
+### Fixed
+- Opening or toggling the folder sidebar while its directory tree loads no longer shrinks the results into a narrow strip or centers the search bar in empty space.
+- Results keep the available window height during loading, resizing, empty searches, thumbnail view, and an empty preview pane. The selected drive or folder remains in place.
+
 ## [0.5.3] - 2026-10-11
 
 ### Fixed
@@ -120,6 +126,7 @@ All notable changes to EverythingMac are recorded here. The format is based on
 ### Added
 - First public release. Instant filename and folder search across every mounted volume, updating as you type. FSEvents-backed live index, a binary on-disk cache for instant restarts, and right-click actions (Open, Open With, Reveal in Finder, Copy Path/Name, Move to Trash).
 
+[0.5.4]: https://github.com/alesloa/everything-mac/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/alesloa/everything-mac/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/alesloa/everything-mac/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/alesloa/everything-mac/compare/v0.5.0...v0.5.1

@@ -51,12 +51,13 @@ struct SearchResultsArea: View {
                         onOrdering: model.setResultOrdering, selectedRows: model.rowSelection,
                         onRowSelection: model.selectRows, onRowAction: model.performRows)
                 }
-            }.frame(minWidth: 250)
+            }.frame(minWidth: 250, maxHeight: .infinity)
             if model.previewVisible {
                 PreviewPane(records: model.actionRecords, allowsNetwork: model.previewAllowsNetwork)
-                    .frame(minWidth: 220, idealWidth: 320)
+                    .frame(minWidth: 220, idealWidth: 320, maxHeight: .infinity, alignment: .topLeading)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { model.refreshFolderDetailsIfNeeded() }
     }
 }

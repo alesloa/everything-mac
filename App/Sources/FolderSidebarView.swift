@@ -23,8 +23,9 @@ struct FolderSidebarView: View {
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(selectedScope == nil ? Color.accentColor.opacity(0.15) : .clear)
             }.buttonStyle(.plain).padding(.horizontal, 4)
-            if let snapshot {
-                ScrollView {
+            // Keep the scrolling pane flexible while its snapshot is being prepared.
+            ScrollView {
+                if let snapshot {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(snapshot.roots, id: \.self) { id in
                             folder(id, snapshot: snapshot, depth: 0)
@@ -36,7 +37,7 @@ struct FolderSidebarView: View {
             Text("Choose All Indexed Folders to search everywhere.")
                 .font(.caption).foregroundStyle(.secondary).padding(10)
         }
-        .frame(minWidth: 180, idealWidth: 230, maxWidth: 320)
+        .frame(minWidth: 180, idealWidth: 230, maxWidth: 320, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func folder(_ id: UInt32, snapshot: FolderSnapshot, depth: Int) -> AnyView {
