@@ -14,6 +14,8 @@ extension AppModel {
         state.sortKey = Self.sortKeyName(sortKey); state.ascending = ascending; state.resultLimit = resultLimit
         state.previewVisible = previewVisible; state.thumbnailView = thumbnailView
         state.folderScopePath = folderScope?.path
+        state.folderScopePaths = folderSearchScope?.included.map(\.path)
+        state.excludedFolderScopePaths = folderSearchScope?.excluded.map(\.path)
         state.folderSidebarVisible = folderSidebarVisible; state.indexedFolderTotals = indexedFolderTotals
         return state
     }
@@ -32,10 +34,10 @@ extension AppModel {
         ignorePunctuation = state.ignorePunctuation; ignoreWhitespace = state.ignoreWhitespace
         searchFilters = state.effectiveFilters; sortKey = Self.sortKey(from: state.sortKey); ascending = state.ascending
         resultLimit = state.resultLimit; previewVisible = state.previewVisible; thumbnailView = state.thumbnailView
-        folderScope = state.folderScopePath.map { FolderScope(path: $0) }
+        folderSearchScope = state.effectiveFolderSearchScope
         // Source: the owner wants collapsing to retain the selected location.
         // Honor saved visibility; older scoped searches without it start expanded.
-        folderSidebarVisible = state.folderSidebarVisible ?? (folderScope != nil)
+        folderSidebarVisible = state.folderSidebarVisible ?? (folderSearchScope != nil)
         indexedFolderTotals = state.indexedFolderTotals ?? false
         indexedTotalsColumnOverride = state.indexedFolderTotals
         refreshFolderDetailsIfNeeded()

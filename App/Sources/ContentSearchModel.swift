@@ -12,24 +12,29 @@ final class ContentSearchModel: ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var query: Query?
     @Published private(set) var folderPath: String?
+    @Published private(set) var folderSelection: FolderSearchScope?
     private let index: SearchIndex
     private let selectedPaths: [String]
     private var task: Task<Void, Never>?
     private var generation = UUID()
 
-    init(index: SearchIndex, query: Query?, selectedPaths: [String], folderPath: String?) {
+    init(index: SearchIndex, query: Query?, selectedPaths: [String], folderPath: String? = nil,
+         folderSelection: FolderSearchScope? = nil) {
         self.index = index; self.selectedPaths = selectedPaths; self.folderPath = folderPath
+        self.folderSelection = folderSelection
         let validQuery = query?.validationError == nil ? query : nil
         self.query = validQuery
         useFilenameQuery = validQuery != nil
     }
 
-    func updateScope(query: Query?, folderPath: String?) {
-        guard self.query != query || !Self.samePath(self.folderPath, folderPath) else { return }
+    func updateScope(query: Query?, folderPath: String? = nil, folderSelection: FolderSearchScope? = nil) {
+        guard self.query != query || !Self.samePath(self.folderPath, folderPath)
+                || self.folderSelection != folderSelection else { return }
         cancel()
         progress = ContentSearchProgress()
         self.query = query?.validationError == nil ? query : nil
         self.folderPath = folderPath
+        self.folderSelection = folderSelection
         if self.query == nil { useFilenameQuery = false }
     }
 
@@ -39,7 +44,7 @@ final class ContentSearchModel: ObservableObject {
         progress = ContentSearchProgress(); isRunning = true
         let request = ContentSearchRequest(literal: literal, filenameQuery: query,
             restrictToFilenameQuery: useFilenameQuery, folderPath: folderPath,
-            pickedFolderPath: pickedFolderPath, options: options)
+            pickedFolderPath: pickedFolderPath, folderSelection: folderSelection, options: options)
         let updates = ContentSearchService.events(index: index, request: request)
         task = Task { [weak self] in
             for await update in updates {
@@ -67,7 +72,7 @@ final class ContentSearchModel: ObservableObject {
         // Source: the owner's requested explicit folder scope.
         panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        if let path = pickedFolderPath ?? folderPath ?? selectedPaths.first {
+        if let path = pickedFolderPath ?? folderSelection?.included.first?.path ?? folderPath ?? selectedPaths.first {
             panel.directoryURL = URL(fileURLWithPath: path).deletingLastPathComponent()
         }
         panel.begin { [weak self] result in

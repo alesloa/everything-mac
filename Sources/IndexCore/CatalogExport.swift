@@ -53,10 +53,11 @@ extension CatalogIO {
 
     @discardableResult
     public static func exportNative(store: FileStore, query: Query, sort: QueryEngine.SortKey = .relevance,
-                                    ascending: Bool = true, folderPath: String? = nil, to url: URL, format: CatalogFormat,
+                                    ascending: Bool = true, folderPath: String? = nil, folderSelection: FolderSearchScope? = nil,
+                                    to url: URL, format: CatalogFormat,
                                     isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> Int {
         let ids = try CatalogSearch.nativeIDs(store: store, query: query, sort: sort, ascending: ascending,
-                                              folderPath: folderPath, isCancelled: isCancelled)
+                                              folderPath: folderPath, folderSelection: folderSelection, isCancelled: isCancelled)
         let namespace = UUID()
         return try exportStream(to: url, format: format, isCancelled: isCancelled) { emit in
             // Sorting retains compact IDs only; full-path records are emitted

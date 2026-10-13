@@ -4,6 +4,7 @@ import IndexCore
 struct SearchResultsArea: View {
     @ObservedObject var model: AppModel
     @ObservedObject private var folders: FolderDetailsModel
+    @StateObject private var treeState = FolderSidebarState()
 
     init(model: AppModel) {
         self.model = model
@@ -18,17 +19,13 @@ struct SearchResultsArea: View {
     var body: some View {
         HSplitView {
             if model.folderSidebarVisible {
-                FolderSidebarView(snapshot: folders.snapshot, selectedScope: model.folderScope,
-                                  onSelect: model.setFolderScope)
+                FolderSidebarView(snapshot: folders.snapshot, selectedScope: model.folderSearchScope,
+                                  onSelect: { model.setFolderSearchScope($0) }, treeState: treeState)
             }
             VStack(spacing: 0) {
-                if let scope = model.folderScope {
-                    HStack {
-                        // Source: this window's owner-selected indexed folder path.
-                        Text(scope.path).font(.caption).textSelection(.enabled).lineLimit(1)
-                        Spacer()
-                        Button { model.setFolderScope(nil) } label: { Image(systemName: "xmark.circle") }
-                    }.padding(8)
+                if let scope = model.folderSearchScope {
+                    FolderSearchScopeBar(selection: scope,
+                                         onSelect: { model.setFolderSearchScope($0, revealSidebar: false) })
                 }
                 if model.thumbnailView {
                     ThumbnailResultsView(rows: model.results, selectedRecords: model.actionRecords,

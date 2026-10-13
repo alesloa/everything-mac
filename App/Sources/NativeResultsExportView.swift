@@ -3,6 +3,24 @@ import AppKit
 import UniformTypeIdentifiers
 import IndexCore
 
+// The background writer captures this exact native snapshot and complete folder
+// restriction before leaving the main actor; selected/shown exports use rows.
+struct NativeResultsExportRequest: Sendable {
+    let snapshot: FileStore
+    let query: Query
+    let sort: QueryEngine.SortKey
+    let ascending: Bool
+    let folderPath: String?
+    let folderSelection: FolderSearchScope?
+
+    func export(to url: URL, format: CatalogFormat,
+                isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> Int {
+        try CatalogIO.exportNative(store: snapshot, query: query, sort: sort, ascending: ascending,
+            folderPath: folderPath, folderSelection: folderSelection,
+            to: url, format: format, isCancelled: isCancelled)
+    }
+}
+
 /// Labels implement the owner's requested native selected/shown/full exports.
 /// Query, sorting and row counts come from the captured native search state.
 struct NativeResultsExportView: View {
@@ -13,6 +31,7 @@ struct NativeResultsExportView: View {
     var sort: QueryEngine.SortKey = .relevance
     var ascending = true
     var folderPath: String? = nil
+    var folderSelection: FolderSearchScope? = nil
     var selection: SearchRowSelection? = nil
     @State private var format: CatalogFormat = .csv
     @State private var scope: CatalogExportScope = .allMatching
@@ -22,6 +41,11 @@ struct NativeResultsExportView: View {
     @State private var operation: Task<Void, Never>?
     @Environment(\.dismiss) private var dismiss
 
+    var matchingRequest: NativeResultsExportRequest {
+        NativeResultsExportRequest(snapshot: index.readSnapshot(), query: query, sort: sort,
+            ascending: ascending, folderPath: folderPath, folderSelection: folderSelection)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Export results").font(.title2)
@@ -30,6 +54,11 @@ struct NativeResultsExportView: View {
             // These numbers come from the captured selection and shown arrays.
             Text("\((selection?.count ?? selected.count).formatted()) selected · \(shown.count.formatted()) shown").font(.caption).foregroundStyle(.secondary)
             Text(query.text).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+            if scope == .allMatching {
+                if let folderSelection {
+                    FolderSearchScopeDetails(selection: folderSelection)
+                } else if let folderPath { Text(folderPath).font(.caption).textSelection(.enabled) }
+            }
             // This behavior description comes from CatalogIO.exportNative.
             Text("All matching rows exports the complete query in the current sort order. Shown rows exports the visible rows.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -53,6 +82,7 @@ struct NativeResultsExportView: View {
         panel.allowedContentTypes = [UTType(filenameExtension: format.rawValue)].compactMap { $0 }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let cancellation = CatalogWorkCancellation(), format = format, scope = scope
+        let matchingRequest = matchingRequest
         let namespace = UUID(), records = (scope == .selected ? selected : shown).map { CatalogRecord(native: $0, catalogID: namespace) }
         self.cancellation = cancellation; isWorking = true; errorMessage = nil
         operation = Task {
@@ -68,8 +98,8 @@ struct NativeResultsExportView: View {
                                                              isCancelled: { cancellation.isCancelled })
                     }
                     if scope == .allMatching {
-                        return try CatalogIO.exportNative(store: index.readSnapshot(), query: query, sort: sort, ascending: ascending,
-                            folderPath: folderPath, to: url, format: format, isCancelled: { cancellation.isCancelled })
+                        return try matchingRequest.export(to: url, format: format,
+                            isCancelled: { cancellation.isCancelled })
                     }
                     return try CatalogIO.exportRows(records, to: url, format: format, isCancelled: { cancellation.isCancelled })
                 }.value

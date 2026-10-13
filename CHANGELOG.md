@@ -4,6 +4,14 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [0.6.0] - 2026-10-13
+
+### Added
+- Select multiple folders in the native directory tree with Shift-click ranges or Command-click individual selections.
+- Exclude folders from the current search through the directory tree's context menu, including searching all indexed folders except `/Volumes`.
+- Included folders and exclusions stay visible above the results and persist in tabs, saved searches, and restored sessions. Collapsing the sidebar retains the complete selection.
+- Full-query exports, content search, and duplicate searches honor the same included folders and exclusions.
+
 ## [0.5.4] - 2026-10-13
 
 ### Fixed
@@ -126,6 +134,7 @@ All notable changes to EverythingMac are recorded here. The format is based on
 ### Added
 - First public release. Instant filename and folder search across every mounted volume, updating as you type. FSEvents-backed live index, a binary on-disk cache for instant restarts, and right-click actions (Open, Open With, Reveal in Finder, Copy Path/Name, Move to Trash).
 
+[0.6.0]: https://github.com/alesloa/everything-mac/compare/v0.5.4...v0.6.0
 [0.5.4]: https://github.com/alesloa/everything-mac/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/alesloa/everything-mac/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/alesloa/everything-mac/compare/v0.5.1...v0.5.2

@@ -6,10 +6,12 @@ extension CatalogSearch {
     public static func nativeIDs(store: FileStore, query input: Query,
                                  sort: QueryEngine.SortKey = .name, ascending: Bool = true,
                                  limit: Int? = nil, folderPath: String? = nil,
+                                 folderSelection: FolderSearchScope? = nil,
                                  isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> [UInt32] {
         if let error = input.validationError { throw error }
         let query = input.refreshingRelativeDates(), engine = QueryEngine()
-        let candidates = try CatalogNativeScope.candidates(folderPath: folderPath, in: store, isCancelled: isCancelled)
+        let candidates = try CatalogNativeScope.candidates(folderPath: folderPath, folderSelection: folderSelection,
+                                                          in: store, isCancelled: isCancelled)
         let ids: [UInt32]
         if query.hasFuzzyTerms && sort == .relevance {
             let matches = engine.matches(query, in: store, candidates: candidates, isCancelled: isCancelled)

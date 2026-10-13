@@ -5,11 +5,14 @@ struct ContentSearchView: View {
     @StateObject private var model: ContentSearchModel
     private let query: Query?
     private let folderPath: String?
+    private let folderSelection: FolderSearchScope?
 
-    init(index: SearchIndex, query: Query?, selectedPaths: [String] = [], folderPath: String? = nil) {
+    init(index: SearchIndex, query: Query?, selectedPaths: [String] = [], folderPath: String? = nil,
+         folderSelection: FolderSearchScope? = nil) {
         self.query = query; self.folderPath = folderPath
+        self.folderSelection = folderSelection
         _model = StateObject(wrappedValue: ContentSearchModel(index: index, query: query,
-            selectedPaths: selectedPaths, folderPath: folderPath))
+            selectedPaths: selectedPaths, folderPath: folderPath, folderSelection: folderSelection))
     }
 
     // Source: all fixed labels describe the owner's content-search request,
@@ -53,9 +56,14 @@ struct ContentSearchView: View {
         }
         .padding(20).frame(minWidth: 620, minHeight: 520)
         .onDisappear { model.cancel() }
-        .onChange(of: query) { _, new in model.updateScope(query: new, folderPath: folderPath) }
+        .onChange(of: query) { _, new in
+            model.updateScope(query: new, folderPath: folderPath, folderSelection: folderSelection)
+        }
         .onChange(of: folderPath.map { Array($0.utf8) }) { _, _ in
-            model.updateScope(query: query, folderPath: folderPath)
+            model.updateScope(query: query, folderPath: folderPath, folderSelection: folderSelection)
+        }
+        .onChange(of: folderSelection) { _, new in
+            model.updateScope(query: query, folderPath: folderPath, folderSelection: new)
         }
     }
 
@@ -68,7 +76,9 @@ struct ContentSearchView: View {
             if model.useFilenameQuery, let query = model.query {
                 Text(query.text).font(.caption).textSelection(.enabled)
             }
-            if let scope = model.folderPath {
+            if let selection = model.folderSelection {
+                FolderSearchScopeDetails(selection: selection)
+            } else if let scope = model.folderPath {
                 Text(scope).font(.caption).textSelection(.enabled)
             }
             HStack {

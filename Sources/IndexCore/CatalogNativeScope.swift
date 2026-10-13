@@ -1,32 +1,22 @@
 import Foundation
 
-/// Export folder scope uses actual parent IDs in the captured FileStore, so
-/// lookalike prefixes and a stale/reused numeric folder ID cannot widen export.
+/// Native search tools share the live search's exact-path, parent-ID scope.
 enum CatalogNativeScope {
-    static func candidates(folderPath: String?, in store: FileStore,
-                           isCancelled: @Sendable () -> Bool) throws -> [UInt32]? {
-        guard let folderPath else { return nil }
-        var folder: UInt32?
-        for row in 0..<store.count {
-            if row & 255 == 0 && isCancelled() { throw CancellationError() }
-            let id = UInt32(row)
-            if store.isLive(id), store.isDir(of: id), store.path(of: id).utf8.elementsEqual(folderPath.utf8) {
-                folder = id; break
-            }
+    static func resolve(folderPath: String?, folderSelection: FolderSearchScope? = nil,
+                        in store: FileStore, isCancelled: @Sendable () -> Bool) throws -> ResolvedFolderSearchScope? {
+        let selection = folderSelection ?? folderPath.map { FolderSearchScope(included: [FolderScope(path: $0)]) }
+        guard let selection else { return nil }
+        let resolved = try ResolvedFolderSearchScope(selection, in: store, isCancelled: isCancelled)
+        if folderSelection == nil, let missing = resolved.missingIncludedPaths.first {
+            // Source: the requested path and its absence from this captured index.
+            throw CatalogError.invalidScope("The selected folder is absent from the index snapshot: \(missing)")
         }
-        guard let folder else { throw CatalogError.invalidScope("The selected folder is absent from the index snapshot: \(folderPath)") }
-        var candidates: [UInt32] = []
-        for row in 0..<store.count {
-            if row & 255 == 0 && isCancelled() { throw CancellationError() }
-            let id = UInt32(row)
-            guard store.isLive(id), id != folder else { continue }
-            var parent = store.parent(of: id), visited = 0
-            while parent != FileStore.noParent && Int(parent) < store.count && visited < store.count {
-                if visited & 255 == 0 && isCancelled() { throw CancellationError() }
-                if parent == folder { candidates.append(id); break }
-                parent = store.parent(of: parent); visited += 1
-            }
-        }
-        return candidates
+        return resolved
+    }
+
+    static func candidates(folderPath: String?, folderSelection: FolderSearchScope? = nil,
+                           in store: FileStore, isCancelled: @Sendable () -> Bool) throws -> [UInt32]? {
+        try resolve(folderPath: folderPath, folderSelection: folderSelection, in: store, isCancelled: isCancelled)?
+            .candidates(in: store, isCancelled: isCancelled)
     }
 }

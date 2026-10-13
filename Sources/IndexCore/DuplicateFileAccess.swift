@@ -167,22 +167,11 @@ struct DuplicateInventory: Sendable {
                 inventory.inspect(path, access: access, progress: progress)
             }
         case .query(let snapshot, let query, let folderPath):
-            let candidates: [UInt32]?
-            do {
-                candidates = try CatalogNativeScope.candidates(folderPath: folderPath, in: snapshot,
-                    isCancelled: { cancellation.isCancelled })
-            } catch {
-                if let folderPath, !cancellation.isCancelled { inventory.skip(folderPath, .unavailable) }
-                return inventory
-            }
-            let ids = QueryEngine().search(query.refreshingRelativeDates(), in: snapshot,
-                                          candidates: candidates,
-                                          isCancelled: { cancellation.isCancelled })
-            for id in ids {
-                if cancellation.isCancelled { break }
-                guard !snapshot.isDir(of: id) else { continue }
-                inventory.inspect(snapshot.path(of: id), access: access, progress: progress)
-            }
+            inventory.inspectQuery(snapshot: snapshot, query: query, folderPath: folderPath,
+                                   access: access, cancellation: cancellation, progress: progress)
+        case .scopedQuery(let snapshot, let query, let folderSelection):
+            inventory.inspectQuery(snapshot: snapshot, query: query, folderSelection: folderSelection,
+                                   access: access, cancellation: cancellation, progress: progress)
         case .folder(let rawPath):
             let path = Scanner.normalizedRoot(rawPath)
             guard let descriptor = access.openDirectory(path) else {
@@ -200,6 +189,28 @@ struct DuplicateInventory: Sendable {
             inventory.walk(path, descriptor: descriptor, access: access, cancellation: cancellation, progress: progress)
         }
         return inventory
+    }
+
+    private mutating func inspectQuery(snapshot: FileStore, query: Query, folderPath: String? = nil,
+                                       folderSelection: FolderSearchScope? = nil, access: DuplicateFileAccess,
+                                       cancellation: DuplicateCancellation, progress: DuplicateProgressReporter) {
+        let candidates: [UInt32]?
+        do {
+            let resolved = try CatalogNativeScope.resolve(folderPath: folderPath, folderSelection: folderSelection,
+                in: snapshot, isCancelled: { cancellation.isCancelled })
+            for path in resolved?.missingIncludedPaths ?? [] { skip(path, .unavailable) }
+            candidates = try resolved?.candidates(in: snapshot, isCancelled: { cancellation.isCancelled })
+        } catch {
+            if let folderPath, !cancellation.isCancelled { skip(folderPath, .unavailable) }
+            return
+        }
+        let ids = QueryEngine().search(query.refreshingRelativeDates(), in: snapshot, candidates: candidates,
+                                      isCancelled: { cancellation.isCancelled })
+        for id in ids {
+            if cancellation.isCancelled { break }
+            guard !snapshot.isDir(of: id) else { continue }
+            inspect(snapshot.path(of: id), access: access, progress: progress)
+        }
     }
 
     private mutating func inspect(_ path: String, access: DuplicateFileAccess,

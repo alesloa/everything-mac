@@ -25,6 +25,10 @@ public struct SearchWorkspaceState: Codable, Equatable, Sendable {
     // Source: these optional view/scope fields preserve older workspace archives;
     // paths are owner-selected indexed folders, and absent flags use app defaults.
     public var folderScopePath: String?
+    // Source: owner-selected included and excluded indexed folders. Only paths
+    // are persisted; FileStore IDs may change after rescanning or compaction.
+    public var folderScopePaths: [String]?
+    public var excludedFolderScopePaths: [String]?
     public var folderSidebarVisible: Bool?
     public var indexedFolderTotals: Bool?
 
@@ -32,6 +36,16 @@ public struct SearchWorkspaceState: Codable, Equatable, Sendable {
 
     public var effectiveFilters: SearchFilters {
         filters ?? SearchFilters(types: searchFilter == .all ? [] : [searchFilter])
+    }
+
+    public var effectiveFolderSearchScope: FolderSearchScope? {
+        // An explicit new inclusion array supersedes the legacy location.
+        // A legacy location may still be combined with new excluded paths.
+        let included = folderScopePaths ?? folderScopePath.map { [$0] } ?? []
+        let excluded = excludedFolderScopePaths ?? []
+        guard !included.isEmpty || !excluded.isEmpty else { return nil }
+        return FolderSearchScope(included: included.map { FolderScope(path: $0) },
+                                 excluded: excluded.map { FolderScope(path: $0) })
     }
 
     public var searchQuery: Query {
@@ -44,7 +58,7 @@ public struct SearchWorkspaceState: Codable, Equatable, Sendable {
 
     public var hasSearch: Bool {
         !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || !effectiveFilters.isEmpty || customFilterID != nil || folderScopePath != nil
+            || !effectiveFilters.isEmpty || customFilterID != nil || effectiveFolderSearchScope != nil
     }
 
     public mutating func normalize() {
