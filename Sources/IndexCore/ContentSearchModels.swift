@@ -44,13 +44,16 @@ public struct ContentSearchRequest: Sendable {
     public var filenameQuery: Query?
     public var restrictToFilenameQuery: Bool
     public var folderPath: String?
+    public var folderSelection: FolderSearchScope?
     public var pickedFolderPath: String?
     public var options: ContentSearchOptions
     public init(literal: String, filenameQuery: Query? = nil, restrictToFilenameQuery: Bool = false,
                 folderPath: String? = nil, pickedFolderPath: String? = nil,
+                folderSelection: FolderSearchScope? = nil,
                 options: ContentSearchOptions = ContentSearchOptions()) {
         self.literal = literal; self.filenameQuery = filenameQuery
         self.restrictToFilenameQuery = restrictToFilenameQuery; self.folderPath = folderPath
+        self.folderSelection = folderSelection
         self.pickedFolderPath = pickedFolderPath; self.options = options
     }
 }

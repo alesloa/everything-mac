@@ -3,6 +3,7 @@ import Foundation
 public enum DuplicateScope: Sendable {
     case paths([String])
     case query(snapshot: FileStore, query: Query, folderPath: String? = nil)
+    case scopedQuery(snapshot: FileStore, query: Query, folderSelection: FolderSearchScope)
     case folder(String)
 }
 

@@ -80,7 +80,8 @@ public enum ContentSearchService {
     private static func candidates(request: ContentSearchRequest, store: FileStore,
                                    cancellation: SearchCancellation) throws -> [UInt32] {
         let isCancelled: @Sendable () -> Bool = { cancellation.isCancelled || Task.isCancelled }
-        var scope = try CatalogNativeScope.candidates(folderPath: request.folderPath, in: store, isCancelled: isCancelled)
+        var scope = try CatalogNativeScope.candidates(folderPath: request.folderPath, folderSelection: request.folderSelection,
+                                                     in: store, isCancelled: isCancelled)
         if let picked = request.pickedFolderPath {
             let pickedIDs = try CatalogNativeScope.candidates(folderPath: picked, in: store, isCancelled: isCancelled) ?? []
             if let current = scope {

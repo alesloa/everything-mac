@@ -45,13 +45,15 @@ public final class SearchIndex: @unchecked Sendable {
 
     public func searchReport(_ query: Query, sort: QueryEngine.SortKey = .relevance,
                              ascending: Bool = true, limit: Int = 5000,
-                             scope: FolderScope? = nil, includeAllResults: Bool = false) async -> SearchReport {
+                             scope: FolderScope? = nil, folderSelection: FolderSearchScope? = nil,
+                             includeAllResults: Bool = false) async -> SearchReport {
         let query = query.refreshingRelativeDates()
         let snapshot = lock.withLock { current }
         let cancellation = SearchCancellation()
         return await withTaskCancellationHandler {
             let worker = Task.detached(priority: .userInitiated) {
                 snapshot.search(query, sort: sort, ascending: ascending, limit: limit, scope: scope,
+                                folderSelection: folderSelection,
                                 includeAllResults: includeAllResults,
                                 isCancelled: { cancellation.isCancelled })
             }
@@ -81,6 +83,7 @@ public final class SearchIndex: @unchecked Sendable {
         let id = UUID()
         private let cacheLock = NSLock()
         private var cached: (Query, Matches)?
+        private var cachedScope: (FolderSearchScope, ResolvedFolderSearchScope)?
         private var nameIndex: UniqueNameIndex?
         private let namePreparation: UniqueNameIndex.Preparation
         private var folderTask: Task<FolderSnapshot?, Never>?
@@ -120,7 +123,7 @@ public final class SearchIndex: @unchecked Sendable {
         }
 
         func search(_ query: Query, sort: QueryEngine.SortKey, ascending: Bool, limit: Int,
-                    scope: FolderScope?, includeAllResults: Bool,
+                    scope: FolderScope?, folderSelection: FolderSearchScope?, includeAllResults: Bool,
                     isCancelled: @escaping @Sendable () -> Bool) -> SearchReport {
             let empty = SearchReport(records: [], totalMatches: 0, snapshotID: id, revision: store.revision)
             guard !isCancelled() else { return empty }
@@ -149,27 +152,22 @@ public final class SearchIndex: @unchecked Sendable {
                 withExtendedLifetime(old) {}
             }
             let displayedMatches: Matches
-            if let scope {
-                guard let directory = scope.resolve(in: store, isCancelled: isCancelled) else { return empty }
+            if let selection = folderSelection ?? scope.map({ FolderSearchScope(included: [$0]) }) {
+                let resolved: ResolvedFolderSearchScope
+                if let cached = cacheLock.withLock({ cachedScope }), cached.0 == selection { resolved = cached.1 }
+                else {
+                    guard let prepared = try? ResolvedFolderSearchScope(selection, in: store, isCancelled: isCancelled) else { return empty }
+                    resolved = prepared
+                    cacheLock.withLock { cachedScope = (selection, resolved) }
+                }
                 // Scope is applied after the cached query: changing the sidebar
                 // never invalidates or repeats an ordinary full-index scan.
-                func included(_ child: UInt32) -> Bool {
-                    FolderScope.contains(child, below: directory, in: store)
-                }
                 switch matches {
                 case .exact(let ids):
-                    var filtered: [UInt32] = []
-                    for (offset, child) in ids.enumerated() {
-                        if offset & 1023 == 0 && isCancelled() { return empty }
-                        if included(child) { filtered.append(child) }
-                    }
+                    guard let filtered = try? resolved.filter(ids, id: { $0 }, in: store, isCancelled: isCancelled) else { return empty }
                     displayedMatches = .exact(filtered)
                 case .fuzzy(let scored):
-                    var filtered: [SearchMatch] = []
-                    for (offset, match) in scored.enumerated() {
-                        if offset & 1023 == 0 && isCancelled() { return empty }
-                        if included(match.id) { filtered.append(match) }
-                    }
+                    guard let filtered = try? resolved.filter(scored, id: { $0.id }, in: store, isCancelled: isCancelled) else { return empty }
                     displayedMatches = .fuzzy(filtered)
                 }
             } else { displayedMatches = matches }
