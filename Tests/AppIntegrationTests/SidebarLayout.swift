@@ -120,7 +120,7 @@ private actor FolderPreparationGate {
         if thumbnails {
             scroll = descendants.compactMap { $0 as? NSCollectionView }.first?.enclosingScrollView
         } else {
-            scroll = descendants.compactMap { $0 as? NSTableView }.first?.enclosingScrollView
+            scroll = descendants.compactMap { $0 is NSOutlineView ? nil : $0 as? NSTableView }.first?.enclosingScrollView
         }
         guard let scroll, let toggle = descendants.compactMap({ $0 as? NSButton }).first(where: {
             $0.identifier?.rawValue == "folder-sidebar-toggle"
