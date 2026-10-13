@@ -55,6 +55,7 @@ struct ContentView: View {
                       shares: model.shares, matches: model.totalMatches, ordering: model.resultOrdering,
                       selected: model.selectionCount)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(.regularMaterial)
         .onAppear { searchFocused = true }
         .onChange(of: model.focusSearchSignal) { searchFocused = true }
