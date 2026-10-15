@@ -46,6 +46,7 @@ fi
 # Sign the nested executable first, then seal the modified outer bundle while
 # retaining Xcode's identifier, entitlements, designated requirement and flags.
 install -m 755 "$MCP_EXECUTABLE" "$APP/Contents/MacOS/everything-mcp"
+python3 ../scripts/bundle-mcp-licenses.py ../.build/checkouts "$APP/Contents/Resources/MCP-Licenses"
 codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$APP/Contents/MacOS/everything-mcp"
 codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none \
   --preserve-metadata=identifier,entitlements,requirements,flags "$APP"

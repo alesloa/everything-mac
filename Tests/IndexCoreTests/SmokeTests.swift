@@ -3,5 +3,5 @@ import Testing
 
 @Test func versionIsSet() {
     // Source: the application version in App/project.yml.
-    #expect(IndexCore.version == "0.6.1")
+    #expect(IndexCore.version == "0.6.2")
 }

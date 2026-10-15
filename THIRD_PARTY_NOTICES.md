@@ -20,3 +20,10 @@ EverythingMac remains a Swift application. It does not bundle or launch the
 Rust `fsearch` executable. Its immutable search snapshots, Swift integration,
 incremental query narrowing, mapped-base/live-overlay storage, background
 compaction, and existing substring/glob engine are implemented in this repository.
+
+The bundled `everything-mcp` executable uses the official Swift MCP SDK and its
+Swift System, SwiftLog, and EventSource runtime dependencies. The build scripts
+copy those resolved dependencies' full license and notice files into
+`EverythingMac.app/Contents/Resources/MCP-Licenses`. Its `sources.json` records
+the repository URLs, versions, and revisions from `Package.resolved`. The SDK's
+license file includes its Apache-2.0/MIT licensing transition notice.

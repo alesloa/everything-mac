@@ -110,6 +110,18 @@ cd everything-mac
 
 The script generates the Xcode project from `App/project.yml`, builds a Release binary, bundles the signed MCP server, and copies the app into `/Applications`. The MCP client command is `/Applications/EverythingMac.app/Contents/MacOS/everything-mcp`; see [MCP.md](MCP.md). Build Release, not Debug. The search loop runs about 100x slower without optimization.
 
+To build a universal DMG in the same Apple Development signed, non-notarized form
+as the existing GitHub releases:
+
+```bash
+./scripts/build-dmg.sh --development-signed
+```
+
+The app and MCP helper include Apple Silicon and Intel slices. The versioned DMG
+and SHA-256 file are written to `.build/releases/<version>/`. The default
+`./scripts/build-dmg.sh` workflow requires `DEVELOPER_ID` and the `notary` keychain
+profile and submits the DMG for notarization.
+
 ### Signing it as yourself
 
 `App/project.yml` has my Apple Development identity hardcoded so Full Disk Access doesn't get revoked every time I rebuild on my own machine. To build it on yours, do one of these:
