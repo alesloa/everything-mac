@@ -31,6 +31,7 @@ So I wrote my own. It reads every filename on the machine into memory and search
 - A menu bar item and configurable global shortcut in Settings. Indexing continues with the search windows closed.
 - An optional indexed folder sidebar and recursive totals, computed from the published index rather than filesystem reads for each row.
 - Tools for portable file catalogs, scoped exports, verified duplicates, folder comparison, content search, and index activity.
+- A read-only [MCP server](MCP.md) for agents to search the saved index and inspect its status, alongside the [command-line tool](COMMAND_LINE.md).
 - Handles millions of files with parallel search, shared filename scoring, and reuse of prior candidates as you keep typing.
 - First-launch onboarding waits for Full Disk Access before scanning, with an option to continue without it.
 - Opt-in network-volume indexing in Settings > Volumes. Selected shares are scanned in the background, retain cached results while offline, and reconnect at launch and after sleep using credentials already saved in the keychain.
@@ -96,7 +97,7 @@ derived dictionary and any snapshots still in use require additional memory.
 ## Requirements
 
 - macOS 14 (Sonoma) or newer
-- Xcode 16 or newer (Swift 6)
+- Xcode with Swift 6.2 or newer (including the MCP SDK's resolved dependencies)
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
 
 ## Build and run
@@ -107,7 +108,7 @@ cd everything-mac
 ./scripts/build-dev.sh
 ```
 
-The script generates the Xcode project from `App/project.yml`, builds a Release binary, and copies the app into `/Applications`. Build Release, not Debug. The search loop runs about 100x slower without optimization.
+The script generates the Xcode project from `App/project.yml`, builds a Release binary, bundles the signed MCP server, and copies the app into `/Applications`. The MCP client command is `/Applications/EverythingMac.app/Contents/MacOS/everything-mcp`; see [MCP.md](MCP.md). Build Release, not Debug. The search loop runs about 100x slower without optimization.
 
 ### Signing it as yourself
 
@@ -135,6 +136,10 @@ Selected shares refresh every five minutes by default, after reconnecting, or wh
 ## Using it
 
 Launch it and start typing. Matches show up right away. Click a column header to sort. Double-click a row to open it, or right-click for Open With, Reveal in Finder, Copy Path, Move to Trash, and the rest.
+
+For agents, build and install the stdio MCP server with `./scripts/install-mcp.sh`,
+then configure an MCP client to launch `everything-mcp`. See [MCP.md](MCP.md) for
+client configuration, tool arguments, result fields, and saved-index behavior.
 
 ### Queries and saved searches
 

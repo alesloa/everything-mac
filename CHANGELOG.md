@@ -4,6 +4,16 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [Unreleased]
+
+### Added
+- A native `everything-mcp` stdio server using the official Swift MCP SDK, with read-only `search_files` and `get_index_status` tools, structured results, and client-neutral setup instructions in [MCP.md](MCP.md).
+- MCP process tests for initialization, tool discovery, exact cached metadata, input errors, folder scope, result limits, cache replacement, and clean shutdown.
+- Bundle the signed MCP executable with the app when running `scripts/build-dev.sh`, so clients can launch it from the installed app.
+
+### Changed
+- Source builds now require Swift 6.2 for the MCP SDK and resolved dependencies. macOS 14 remains the minimum runtime version.
+
 ## [0.6.1] - 2026-10-13
 
 ### Fixed

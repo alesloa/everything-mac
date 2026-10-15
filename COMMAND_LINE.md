@@ -5,7 +5,7 @@ query parser, modifiers, fuzzy ranking and sort functions as the app. It does no
 scan folders, connect to shares, start the app, or save the index. The saved
 snapshot can lag behind the app's live results until the app saves its cache.
 
-Build on macOS 14 or later with Swift 6:
+Build on macOS 14 or later with Swift 6.2:
 
 ```sh
 swift build -c release --product everything
@@ -106,3 +106,6 @@ Run the process regression suite with `./scripts/test-cli.sh`. It builds a relea
 binary and launches real processes against isolated cache fixtures, including
 more than 5,000 results, Unicode and delimiter-heavy names, all output formats,
 cache errors, sorting/scope, closed pipes and cancellation.
+
+For MCP-capable agents, the separate `everything-mcp` executable exposes this
+same saved-index query engine through stdio tools. See [MCP.md](MCP.md).
