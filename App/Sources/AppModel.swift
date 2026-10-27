@@ -127,6 +127,7 @@ final class AppModel: ObservableObject {
     let workspace: SearchWorkspaceController
     private var task: Task<Void, Never>?
     private var liveTask: Task<Void, Never>?
+    private var lastLiveRefresh: ContinuousClock.Instant?
     private var flushTimer: Task<Void, Never>?
     private var cloudSweepTimer: Task<Void, Never>?
     private var fdaPollTask: Task<Void, Never>?
@@ -398,12 +399,18 @@ final class AppModel: ObservableObject {
         } else { r.resultList?.cancel() }
     }
 
-    // Coalesce bursts of FSEvents into at most one refresh per 200ms.
+    // Coalesce bursts of FSEvents for 200ms, and refresh at most every 3s. Each
+    // refresh rebuilds folder totals and repeats every window's search over the
+    // whole index, so steady disk churn must not pay that per change.
     func liveRefresh() {
-        liveTask?.cancel()
+        // The scheduled refresh reads the index as it is when it runs.
+        guard liveTask == nil else { return }
+        let now = ContinuousClock.now
+        let due = max(now + .milliseconds(200), lastLiveRefresh.map { $0 + .seconds(3) } ?? now)
         liveTask = Task {
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            if Task.isCancelled { return }
+            try? await Task.sleep(until: due, clock: .continuous)
+            liveTask = nil
+            lastLiveRefresh = .now
             if !scanning { total = index.totalCount }
             indexDidChange()
             refreshResultsFromIndex()

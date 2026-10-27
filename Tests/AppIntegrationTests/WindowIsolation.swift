@@ -91,6 +91,25 @@ import IndexCore
         check(restored.archive.windows.contains {
             $0.selectedTab.state.folderScopePath == "/" && $0.selectedTab.state.indexedFolderTotals == true
         })
+
+        // Each refresh rebuilds folder totals and repeats every window's search,
+        // so steady disk churn refreshes at most every 3 seconds.
+        let revision = background.indexRevision
+        background.liveRefresh()
+        try await Task.sleep(for: .milliseconds(400))
+        check(background.indexRevision == revision + 1 && first.indexRevision == revision + 1,
+              "A live change after a quiet period was not shown")
+        let firstRefresh = ContinuousClock.now
+        background.liveRefresh()
+        try await Task.sleep(for: .seconds(1))
+        background.liveRefresh()
+        check(background.indexRevision == revision + 1, "Live churn refreshed again within 3 seconds")
+        for _ in 0..<400 where background.indexRevision == revision + 1 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        check(background.indexRevision == revision + 2 && second.indexRevision == revision + 2,
+              "Changes during the wait were not shown in one refresh")
+        check(ContinuousClock.now - firstRefresh >= .milliseconds(2600), "Live refresh came early")
         print("PASS: windows keep independent searches and receive shared index updates")
     }
 }
