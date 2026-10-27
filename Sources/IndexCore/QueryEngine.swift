@@ -5,8 +5,8 @@ public struct QueryEngine: Sendable {
 
     // Pre-classified term: ASCII bytes (fast path) or String fallback.
     private enum TermMatcher: Sendable {
-        case ascii([UInt8])   // lowercased ASCII pattern bytes
-        case string(String)   // original term, for non-ASCII or case-sensitive fallback
+        case ascii([UInt8])   // ASCII pattern bytes, lowercased unless case-sensitive
+        case string(String)   // original term, for non-ASCII fallback
     }
 
     // Full scans return matching ids in ascending order; restricted scans retain
@@ -78,8 +78,7 @@ public struct QueryEngine: Sendable {
         }
 
         let matchers: [TermMatcher] = terms.map { term in
-            if query.caseInsensitive, let bytes = Glob.asciiLowerBytes(term) { return .ascii(bytes) }
-            return .string(term)
+            Glob.asciiBytes(term, caseInsensitive: query.caseInsensitive).map { .ascii($0) } ?? .string(term)
         }
         let ci = query.caseInsensitive
         let matchPath = query.matchPath
@@ -134,7 +133,7 @@ public struct QueryEngine: Sendable {
                     for matcher in matchers {
                         switch matcher {
                         case .ascii(let pattern):
-                            guard Glob.matchesASCII(patternLowerBytes: pattern, in: bytes) else { return false }
+                            guard Glob.matchesASCII(pattern, in: bytes, caseInsensitive: ci) else { return false }
                         case .string(let term):
                             if string == nil { string = store.name(of: id) }
                             guard Glob.matches(pattern: term, in: string!, caseInsensitive: ci) else { return false }
@@ -179,7 +178,7 @@ public struct QueryEngine: Sendable {
                     for m in matchers {
                         switch m {
                         case .ascii(let pat):
-                            if !Glob.matchesASCII(patternLowerBytes: pat, in: Array(pathStr.utf8)[...]) { all = false }
+                            if !Glob.matchesASCII(pat, in: Array(pathStr.utf8)[...], caseInsensitive: ci) { all = false }
                         case .string(let term):
                             if !Glob.matches(pattern: term, in: pathStr, caseInsensitive: ci) { all = false }
                         }
@@ -199,7 +198,7 @@ public struct QueryEngine: Sendable {
                     for m in matchers {
                         switch m {
                         case .ascii(let pat):
-                            if !Glob.matchesASCII(patternLowerBytes: pat, in: nameSlice) { all = false }
+                            if !Glob.matchesASCII(pat, in: nameSlice, caseInsensitive: ci) { all = false }
                         case .string(let term):
                             if nameStr == nil { nameStr = store.name(of: id) }
                             if !Glob.matches(pattern: term, in: nameStr!, caseInsensitive: ci) { all = false }
@@ -218,7 +217,7 @@ public struct QueryEngine: Sendable {
                     let nameSlice = arena.bytes(in: store.nameRange(of: id))
                     var all = true
                     for m in matchers {
-                        if case .ascii(let pat) = m, !Glob.matchesASCII(patternLowerBytes: pat, in: nameSlice) {
+                        if case .ascii(let pat) = m, !Glob.matchesASCII(pat, in: nameSlice, caseInsensitive: ci) {
                             all = false; break
                         }
                     }

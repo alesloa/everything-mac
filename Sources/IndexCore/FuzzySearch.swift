@@ -67,7 +67,7 @@ extension QueryEngine {
         }
         let terms: [FuzzyTerm] = query.tokens.map { token in
             if token.isLiteral {
-                return .literal(token.text, query.caseInsensitive ? Glob.asciiLowerBytes(token.text) : nil)
+                return .literal(token.text, Glob.asciiBytes(token.text, caseInsensitive: query.caseInsensitive))
             }
             if token.text.utf8.allSatisfy({ $0 < 128 }) {
                 return .ascii(FuzzyMatcher.Pattern(token.text, caseInsensitive: query.caseInsensitive))
@@ -89,7 +89,7 @@ extension QueryEngine {
                     score += value
                 case .literal(let pattern, let ascii):
                     if let ascii {
-                        guard Glob.matchesASCII(patternLowerBytes: ascii, in: name) else { return nil }
+                        guard Glob.matchesASCII(ascii, in: name, caseInsensitive: query.caseInsensitive) else { return nil }
                     } else {
                         if string == nil { string = store.name(of: id) }
                         guard Glob.matches(pattern: pattern, in: string!, caseInsensitive: query.caseInsensitive) else { return nil }

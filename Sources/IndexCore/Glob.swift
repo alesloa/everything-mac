@@ -90,11 +90,21 @@ public extension Glob {
         return out
     }
 
-    /// Match `pattern` (already-lowercased ASCII bytes) against `hay` (raw UTF-8 bytes).
-    /// Haystack bytes are ASCII-case-folded on the fly; non-ASCII haystack bytes are
-    /// compared as-is (an ASCII pattern never matches them, which is correct).
+    /// Returns nil if `s` contains any non-ASCII scalar; otherwise the pattern bytes
+    /// for `matchesASCII`: lowercased when case-insensitive, else exactly as typed.
+    static func asciiBytes(_ s: String, caseInsensitive: Bool) -> [UInt8]? {
+        if caseInsensitive { return asciiLowerBytes(s) }
+        return s.utf8.allSatisfy { $0 < 0x80 } ? Array(s.utf8) : nil
+    }
+
+    /// Match ASCII `pattern` against `hay` (raw UTF-8 bytes). Case-insensitive callers
+    /// pass lowercased pattern bytes and haystack bytes are ASCII-folded on the fly;
+    /// case-sensitive callers pass the term's exact bytes and nothing is folded.
+    /// Non-ASCII haystack bytes are compared as-is: ASCII bytes never occur inside a
+    /// multibyte UTF-8 sequence, so this equals the Unicode-scalar match.
     /// Substring match when pattern has no `*` (0x2A) / `?` (0x3F); else anchored glob.
-    static func matchesASCII<Bytes: RandomAccessCollection>(patternLowerBytes pattern: [UInt8], in hay: Bytes) -> Bool
+    static func matchesASCII<Bytes: RandomAccessCollection>(_ pattern: [UInt8], in hay: Bytes,
+                                                            caseInsensitive: Bool) -> Bool
         where Bytes.Element == UInt8, Bytes.Index == Int {
         let hasWildcard = pattern.contains(0x2A) || pattern.contains(0x3F)
         if hasWildcard {
@@ -103,13 +113,15 @@ public extension Glob {
             // semantics and its character-mask prefilter remains conservative.
             if pattern.contains(0x3F), hay.contains(where: { $0 >= 0x80 }) {
                 let scalars = String(decoding: Array(hay), as: UTF8.self).unicodeScalars.map {
-                    $0.value < 0x80 ? Unicode.Scalar(fold(UInt8($0.value))) : $0
+                    caseInsensitive && $0.value < 0x80 ? Unicode.Scalar(fold(UInt8($0.value))) : $0
                 }
                 return globMatch(pattern: pattern.map { Unicode.Scalar($0) }, text: scalars)
             }
-            return bytesGlobMatch(pattern: pattern, hay: hay)
+            return caseInsensitive ? bytesGlobMatch(pattern: pattern, hay: hay, fold: fold)
+                : bytesGlobMatch(pattern: pattern, hay: hay, fold: { $0 })
         } else {
-            return bytesContains(hay: hay, needle: pattern)
+            return caseInsensitive ? bytesContains(hay: hay, needle: pattern, fold: fold)
+                : bytesContains(hay: hay, needle: pattern, fold: { $0 })
         }
     }
 
@@ -119,7 +131,11 @@ public extension Glob {
         b >= 0x41 && b <= 0x5A ? b &+ 0x20 : b
     }
 
-    private static func bytesContains<Bytes: RandomAccessCollection>(hay: Bytes, needle: [UInt8]) -> Bool
+    // `fold` is a fixed function at each call site, so the inlined loops stay
+    // specialized: the case-insensitive scan pays nothing for the exact variant.
+    @inline(__always)
+    private static func bytesContains<Bytes: RandomAccessCollection>(hay: Bytes, needle: [UInt8],
+                                                                     fold: (UInt8) -> UInt8) -> Bool
         where Bytes.Element == UInt8, Bytes.Index == Int {
         if needle.isEmpty { return true }
         let hc = hay.count
@@ -137,7 +153,9 @@ public extension Glob {
         return false
     }
 
-    private static func bytesGlobMatch<Bytes: RandomAccessCollection>(pattern: [UInt8], hay: Bytes) -> Bool
+    @inline(__always)
+    private static func bytesGlobMatch<Bytes: RandomAccessCollection>(pattern: [UInt8], hay: Bytes,
+                                                                      fold: (UInt8) -> UInt8) -> Bool
         where Bytes.Element == UInt8, Bytes.Index == Int {
         let pc = pattern.count
         let hc = hay.count

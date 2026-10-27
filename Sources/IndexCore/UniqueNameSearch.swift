@@ -17,7 +17,8 @@ extension QueryEngine {
         guard let nameIndex, candidates == nil, !query.matchPath, !query.terms.isEmpty else {
             return search(query, in: store, candidates: candidates, isCancelled: isCancelled)
         }
-        let terms = query.terms.map { ($0, query.caseInsensitive ? Glob.asciiLowerBytes($0) : nil) }
+        // Masks fold case, so exact bytes still prune case-sensitive searches.
+        let terms = query.terms.map { ($0, Glob.asciiBytes($0, caseInsensitive: query.caseInsensitive)) }
         let requirements = terms.map { term -> UniqueNameIndex.Requirement in
             let mask = term.1.map { FuzzyMatcher.mask($0.filter { $0 != 42 && $0 != 63 }) } ?? 0
             return .init(mask: mask, allowsMissingCharacter: false, firstCharacter: 0)
@@ -43,7 +44,9 @@ extension QueryEngine {
                             var fits = true
                             for (term, ascii) in localTerms {
                                 if let ascii {
-                                    if !Glob.matchesASCII(patternLowerBytes: ascii, in: bytes) { fits = false; break }
+                                    if !Glob.matchesASCII(ascii, in: bytes, caseInsensitive: query.caseInsensitive) {
+                                        fits = false; break
+                                    }
                                 } else {
                                     if string == nil { string = store.name(of: id) }
                                     if !Glob.matches(pattern: term, in: string!, caseInsensitive: query.caseInsensitive) {
