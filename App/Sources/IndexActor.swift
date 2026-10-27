@@ -353,7 +353,15 @@ actor IndexActor {
         activityJournal.finishScan(id: id, outcome: newStore.scanCompleted ? .scanCompleted : .scanIncomplete,
             detail: newStore.scanCompleted ? nil : "Scanner marked the result incomplete.", count: newStore.count)
         publishStore()
-        if monitor != nil { startMonitor() }
+        if monitor != nil {
+            // The new stream replays everything since scanEventID, including
+            // events the old stream queued or reported dropped while the walk ran.
+            replayCheckpointBlocked = false
+            pendingDirs.removeAll()
+            pendingDeep.removeAll()
+            pendingEventID = 0
+            startMonitor()
+        }
         enqueueChanges([])
         onProgress?(store.count, id)
         shareCounts = [:]
@@ -648,12 +656,33 @@ actor IndexActor {
 
     private func startMonitor() {
         monitor?.stop()
+        monitorGeneration &+= 1
+        historyReplayed = false
+        let generation = monitorGeneration
         let m = LiveMonitor(onChanged: { [weak self] changes in
             guard let self else { return }
-            Task { await self.enqueueChanges(changes) }
+            Task { await self.receiveLiveChanges(changes, generation: generation) }
         })
         m.start(paths: watchPaths(), sinceWhen: FSEventStreamEventId(lastEventID))
         monitor = m
+    }
+
+    private var monitorGeneration = 0
+    private var historyReplayed = false
+    private var overflowRebuildStarted = false
+
+    // A volume-wide overflow blocks the replay checkpoint until a full rebuild.
+    // A live overflow is covered by the next launch's short replay. An overflow
+    // during that replay would recur at every launch, so one rebuild per session
+    // restarts the stream from a fresh checkpoint.
+    func receiveLiveChanges(_ changes: [LiveMonitor.FSChange], generation: Int) {
+        // A replaced stream's queued deliveries are replayed by its successor.
+        guard generation == monitorGeneration else { return }
+        let replaying = !historyReplayed
+        if changes.contains(where: \.historyDone) { historyReplayed = true }
+        guard enqueueChanges(changes), replaying, !overflowRebuildStarted, rebuildID == nil else { return }
+        overflowRebuildStarted = true
+        Task { if await rescanAll() { await flush() } }
     }
 
     // An FSEvents stream rooted at "/" only covers the boot volume's hierarchy
@@ -694,7 +723,10 @@ actor IndexActor {
     private var drainScheduled = false
     private var draining = false
 
-    func enqueueChanges(_ changes: [LiveMonitor.FSChange]) {
+    // Returns whether a change reported a volume-wide overflow.
+    @discardableResult
+    func enqueueChanges(_ changes: [LiveMonitor.FSChange]) -> Bool {
+        var volumeOverflow = false
         for c in changes {
             pendingEventID = max(pendingEventID, c.eventID)
             // FSEvents delivers directories with a trailing slash; the index and the
@@ -710,15 +742,17 @@ actor IndexActor {
                 activityJournal.record(.replayIncomplete, path: p,
                     detail: "FSEvents requested a volume-wide rescan; this live pass checks one directory level.")
                 replayCheckpointBlocked = true
+                volumeOverflow = true
             }
         }
         // A drain is already pending or running — it will sweep up what we just added.
-        guard rebuildID == nil, !drainScheduled, !draining else { return }
+        guard rebuildID == nil, !drainScheduled, !draining else { return volumeOverflow }
         drainScheduled = true
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 500_000_000) // coalesce a 0.5s burst
             await self?.drainChanges()
         }
+        return volumeOverflow
     }
 
     private func drainChanges() async {

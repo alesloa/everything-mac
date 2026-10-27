@@ -131,6 +131,8 @@ private final class ScanFixture: @unchecked Sendable {
         let cached = try IndexCache.load(from: temporary.appendingPathComponent("model.idx")).0
         precondition(cached.liveCount(volID: 1) == 3)
         try await verifySupersededOverflow(in: temporary, suite: suite)
+        try await verifyLiveOverflowRebuildsOnce(in: temporary, suite: suite)
+        try await verifyOverflowAfterReplayWaitsForLaunch(in: temporary, suite: suite)
         try verifyShareReplacement(in: temporary)
         verifyExactSharePathIdentity()
         verifyOfflineShareRetention()
@@ -182,6 +184,61 @@ private final class ScanFixture: @unchecked Sendable {
         let afterAcceptance = try IndexCache.load(from: url).1
         precondition(afterAcceptance == acceptedCheckpoint + 1,
                      "Accepted rebuild did not clear the previous overflow checkpoint block")
+    }
+
+    // An overflow during the launch replay freezes the replay checkpoint.
+    // Without a rebuild, every launch replays the same days-old history again.
+    @MainActor private static func verifyLiveOverflowRebuildsOnce(in temporary: URL, suite: String) async throws {
+        let fixture = ScanFixture()
+        let url = temporary.appendingPathComponent("live-overflow.idx")
+        let index = IndexActor(rules: .defaults, preferencesSuiteName: suite, cacheURL: url,
+                               diskScanner: { fixture.scan($0, isCancelled: $1, progress: $2) })
+        let seeded = await index.rescanAll()
+        precondition(seeded)
+        await index.flush()
+        let checkpoint = try IndexCache.load(from: url).1
+        let overflow = LiveMonitor.FSChange(path: "/Volumes/scan-lifecycle-fixture", mustScanSubtree: true,
+                                            eventID: checkpoint + 1)
+        await index.receiveLiveChanges([overflow], generation: 0)
+        try await waitUntil { fixture.callCount == 2 }
+        try await Task.sleep(for: .milliseconds(650)) // event batching interval is 500ms
+        await index.flush()
+        let rebuilt = try IndexCache.load(from: url).1
+        await index.receiveLiveChanges([.init(path: "/Volumes/scan-lifecycle-fixture", mustScanSubtree: false,
+                                              eventID: rebuilt + 1)], generation: 0)
+        try await Task.sleep(for: .milliseconds(650))
+        await index.flush()
+        let advanced = try IndexCache.load(from: url).1
+        precondition(advanced == rebuilt + 1, "Replay checkpoint stayed frozen after the overflow rebuild")
+        await index.receiveLiveChanges([overflow], generation: 0)
+        try await Task.sleep(for: .milliseconds(650))
+        precondition(fixture.callCount == 2, "A second overflow started another full rebuild in one session")
+        precondition(index.totalCount == 2)
+    }
+
+    // After the replay catches up, an overflow keeps the checkpoint frozen for the
+    // next launch's short replay instead of a full rebuild mid-session.
+    @MainActor private static func verifyOverflowAfterReplayWaitsForLaunch(in temporary: URL, suite: String) async throws {
+        let fixture = ScanFixture()
+        let url = temporary.appendingPathComponent("post-replay-overflow.idx")
+        let index = IndexActor(rules: .defaults, preferencesSuiteName: suite, cacheURL: url,
+                               diskScanner: { fixture.scan($0, isCancelled: $1, progress: $2) })
+        let seeded = await index.rescanAll()
+        precondition(seeded)
+        await index.flush()
+        let checkpoint = try IndexCache.load(from: url).1
+        let path = "/Volumes/scan-lifecycle-fixture"
+        await index.receiveLiveChanges([.init(path: path, mustScanSubtree: false, eventID: checkpoint + 1,
+                                              historyDone: true)], generation: 0)
+        await index.receiveLiveChanges([.init(path: path, mustScanSubtree: true, eventID: checkpoint + 2)],
+                                       generation: 0)
+        await index.receiveLiveChanges([.init(path: path, mustScanSubtree: false, eventID: checkpoint + 3)],
+                                       generation: 0)
+        try await Task.sleep(for: .milliseconds(650)) // event batching interval is 500ms
+        await index.flush()
+        precondition(fixture.callCount == 1, "An overflow after the replay started a full rebuild")
+        let frozen = try IndexCache.load(from: url).1
+        precondition(frozen <= checkpoint + 1, "A live overflow advanced the replay checkpoint")
     }
 
     private static func verifyShareReplacement(in temporary: URL) throws {

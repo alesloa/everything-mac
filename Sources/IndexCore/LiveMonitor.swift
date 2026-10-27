@@ -19,10 +19,13 @@ public final class LiveMonitor: @unchecked Sendable {
         public let path: String
         public let mustScanSubtree: Bool
         public let eventID: UInt64
-        public init(path: String, mustScanSubtree: Bool, eventID: UInt64 = 0) {
+        // kFSEventStreamEventFlagHistoryDone: the replay from sinceWhen has caught up.
+        public let historyDone: Bool
+        public init(path: String, mustScanSubtree: Bool, eventID: UInt64 = 0, historyDone: Bool = false) {
             self.path = path
             self.mustScanSubtree = mustScanSubtree
             self.eventID = eventID
+            self.historyDone = historyDone
         }
     }
 
@@ -144,7 +147,7 @@ public final class LiveMonitor: @unchecked Sendable {
         let nonLocalMounts = Set(MountTable.nonLocalMounts().map { RawFileName($0.path) })
         for name in names {
             let key = RawFileName(name)
-            let full = (directory as NSString).appendingPathComponent(name)
+            let full = Scanner.join(directory, name)
             if rules.shouldExclude(name: name, path: full, isHidden: name.hasPrefix("."), inProjectDir: inProjectDir) { continue }
             // Check before lstat: even stat'ing a stalled share can block.
             if foreignNames.contains(key) || nonLocalMounts.contains(RawFileName(full)) { onDisk.insert(key); continue }
@@ -289,12 +292,13 @@ public final class LiveMonitor: @unchecked Sendable {
             // SIGSEGV on the first delivered event.
             let cfArray = unsafeBitCast(paths, to: NSArray.self)
             let mustScan = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)
+            let historyDone = FSEventStreamEventFlags(kFSEventStreamEventFlagHistoryDone)
             var changes: [FSChange] = []
             changes.reserveCapacity(count)
             for i in 0..<count {
                 guard let p = cfArray[i] as? String else { continue }
                 changes.append(FSChange(path: p, mustScanSubtree: (flags[i] & mustScan) != 0,
-                                        eventID: eventIDs[i]))
+                                        eventID: eventIDs[i], historyDone: (flags[i] & historyDone) != 0))
             }
             context.deliver(changes)
         }

@@ -16,6 +16,12 @@ public struct Scanner: Sendable {
         return root
     }
 
+    // A native Swift string. NSString's appendingPathComponent returns a bridged
+    // one, and every later hash or prefix check on it runs per character.
+    static func join(_ directory: String, _ name: String) -> String {
+        directory.utf8.last == UInt8(ascii: "/") ? directory + name : directory + "/" + name
+    }
+
     // Open the scan root, then reject symlinks in every indexed component.
     // An initial root can have system aliases (e.g. /var) above its boundary.
     static func openDirectory(_ path: String, relativeTo root: String? = nil) -> UnsafeMutablePointer<DIR>? {
@@ -106,7 +112,7 @@ public struct Scanner: Sendable {
 
         var completed = true
         for name in names {
-            let full = (path as NSString).appendingPathComponent(name)
+            let full = Self.join(path, name)
             let isHidden = name.hasPrefix(".")
 
             if rules.shouldExclude(name: name, path: full, isHidden: isHidden, inProjectDir: inProjectDir) { continue }
