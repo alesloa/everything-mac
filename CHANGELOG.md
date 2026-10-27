@@ -4,6 +4,14 @@ All notable changes to EverythingMac are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (`MAJOR.MINOR.PATCH`).
 
+## [0.6.3] - 2026-10-27
+
+### Fixed
+- CPU use no longer climbs while the app stays open. When the saved file-change checkpoint fell days behind, every launch replayed that history, macOS dropped events during the replay, and the checkpoint never advanced. The app now rebuilds the index once to recover and saves a current checkpoint.
+- Case-sensitive searches use the same fast matching and name prefilter as case-insensitive searches, instead of a slow Unicode path that repeated after every live index update.
+- Live updates refresh the folder tree and open searches at most every 3 seconds during steady disk activity. A change after a quiet period still appears within 0.2 seconds.
+- Re-reading a large folder after a change, such as a browser cache with tens of thousands of files, takes less time.
+
 ## [0.6.2] - 2026-10-15
 
 ### Added
