@@ -44,7 +44,7 @@ private struct SearchHistoryLibraryView: View {
             HStack {
                 Button("Open search") {
                     if let entry = library.archive.history.first(where: { $0.id == selection }) { model.openHistorySearch(entry) }
-                }.disabled(!library.archive.history.contains { $0.id == selection })
+                }.glassAction(prominent: true).disabled(!library.archive.history.contains { $0.id == selection })
                 Spacer()
             }
             if let error = library.storageError { Text(error).foregroundStyle(.red).textSelection(.enabled) }
@@ -77,6 +77,6 @@ struct WorkspaceSettingsView: View {
                 Button("Clear search history", role: .destructive) { library.clearHistory() }
             }
             if let error = library.storageError { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-        }.formStyle(.grouped).padding(20)
+        }.formStyle(.grouped).scrollContentBackground(.hidden).padding(20)
     }
 }

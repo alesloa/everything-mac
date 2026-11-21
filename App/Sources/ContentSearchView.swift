@@ -28,7 +28,9 @@ struct ContentSearchView: View {
                     .onSubmit { if !model.isRunning && !model.literal.isEmpty { model.start() } }
                 Button(model.isRunning ? "Cancel" : "Search") {
                     if model.isRunning { model.cancel() } else { model.start() }
-                }.disabled(!model.isRunning && model.literal.isEmpty)
+                }
+                .glassAction(prominent: !model.isRunning)
+                .disabled(!model.isRunning && model.literal.isEmpty)
             }
             controls.disabled(model.isRunning)
             status

@@ -51,7 +51,7 @@ struct AdvancedSearchView: View {
             .formStyle(.columns)
             Text(queryText).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(8)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                .glassSurface(in: RoundedRectangle(cornerRadius: 12))
             if let error = validationError {
                 Text(error.localizedDescription).foregroundStyle(.red).font(.callout)
             }
@@ -60,7 +60,8 @@ struct AdvancedSearchView: View {
             HStack {
                 Spacer()
                 Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
-                Button("Search") { onApply(queryText) }.keyboardShortcut(.defaultAction)
+                Button("Search") { onApply(queryText) }
+                    .glassAction(prominent: true).keyboardShortcut(.defaultAction)
                     .disabled(validationError != nil)
             }
         }

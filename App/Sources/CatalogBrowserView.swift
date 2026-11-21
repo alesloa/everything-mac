@@ -19,7 +19,7 @@ struct CatalogBrowserView: View {
             HStack {
                 Text("File catalogs").font(.title2)
                 Spacer()
-                Button("Import…", action: importCatalog).disabled(store.isWorking)
+                Button("Import…", action: importCatalog).glassAction().disabled(store.isWorking)
                 Button("Done") { dismiss() }
             }
             HStack {
@@ -69,7 +69,9 @@ struct CatalogBrowserView: View {
                 if store.isWorking { Button("Cancel operation") { store.cancelWork() } }
                 Picker("Export", selection: $exportScope) { ForEach(CatalogExportScope.allCases) { Text($0.label).tag($0) } }.frame(width: 220)
                 Picker("Format", selection: $exportFormat) { ForEach(CatalogFormat.allCases) { Text($0.label).tag($0) } }.frame(width: 120)
-                Button("Export…", action: export).disabled(store.isWorking || (exportScope == .selected && store.selection.isEmpty))
+                Button("Export…", action: export)
+                    .glassAction(prominent: true)
+                    .disabled(store.isWorking || (exportScope == .selected && store.selection.isEmpty))
             }
             Divider()
             HStack {

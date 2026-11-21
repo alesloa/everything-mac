@@ -10,7 +10,7 @@ targets:
   EverythingMac:
     type: application
     platform: macOS
-    sources: [Sources, Assets.xcassets, Resources]
+    sources: [Sources, Assets.xcassets, Resources, AppIcon.icon]
     info:
       path: Info.plist
       properties:

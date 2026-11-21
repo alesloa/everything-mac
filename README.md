@@ -97,8 +97,8 @@ derived dictionary and any snapshots still in use require additional memory.
 ## Requirements
 
 - macOS 14 (Sonoma) or newer
-- Xcode with Swift 6.2 or newer (including the MCP SDK's resolved dependencies)
-- [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`
+- Xcode 26 or newer (Swift 6.2+ and Icon Composer support)
+- [XcodeGen](https://github.com/yonaskolb/XcodeGen) 2.45.1 or newer: `brew install xcodegen`
 
 ## Build and run
 

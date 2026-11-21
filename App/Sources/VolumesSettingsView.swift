@@ -139,6 +139,7 @@ struct VolumesSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .padding(20)
         .onAppear {
             volumes = Self.localVolumes()

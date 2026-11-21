@@ -69,7 +69,9 @@ struct NativeResultsExportView: View {
                 Button(isWorking ? "Cancel operation" : "Cancel") {
                     if isWorking { cancellation?.cancel(); operation?.cancel() } else { dismiss() }
                 }
-                Button("Save…", action: save).disabled(isWorking || (scope == .selected && (selection?.count ?? selected.count) == 0))
+                Button("Save…", action: save)
+                    .glassAction(prominent: true)
+                    .disabled(isWorking || (scope == .selected && (selection?.count ?? selected.count) == 0))
                     .keyboardShortcut(.defaultAction)
             }
         }.padding(20).frame(width: 470)
