@@ -15,7 +15,8 @@ struct FolderSidebarView: View {
                 Label("All Indexed Folders", systemImage: "internaldrive")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(selectedScope == nil ? Color.accentColor.opacity(0.15) : .clear)
+                    .background(selectedScope == nil ? Styling.accent.opacity(0.20) : .clear,
+                                in: Capsule())
             }.buttonStyle(.plain).padding(.horizontal, 4)
             FolderOutlineView(snapshot: snapshot, selection: selectedScope,
                               state: treeState, onSelect: onSelect)

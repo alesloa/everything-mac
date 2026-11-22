@@ -70,6 +70,7 @@ struct SearchFiltersButton: View {
                 if count > 0 { Text(count.formatted()).monospacedDigit() }
             }
         }
+        .glassAction(prominent: count > 0)
         .fixedSize().help(model.filterSummary(for: model.workspaceSnapshot))
         .accessibilityLabel("Filters: \(model.filterSummary(for: model.workspaceSnapshot))")
         .popover(isPresented: $presented, arrowEdge: .bottom) {
@@ -130,6 +131,7 @@ struct SearchFiltersPopover: View {
                 Spacer()
                 Button("Cancel", action: close).keyboardShortcut(.cancelAction)
                 Button("Apply") { model.setSearchFilters(draft, customFilterID: customFilterID, options: options); close() }
+                    .glassAction(prominent: true)
                     .keyboardShortcut(.defaultAction).disabled(draft.validationError != nil)
             }
         }.padding(16).frame(width: 330)

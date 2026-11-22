@@ -36,6 +36,8 @@ struct SearchWindowRoot: View {
     var body: some View {
         ContentView().environmentObject(model)
             .frame(minWidth: 800, minHeight: 500)
+            .translucentWindow()
+            .tint(Styling.accent)
             .focusedSceneValue(\.searchModel, model)
             .background(GlobalAccessWindowRegistration(model: model).frame(width: 0, height: 0).allowsHitTesting(false))
             .onAppear {
@@ -65,6 +67,8 @@ struct SearchSettingsRoot: View {
     @State private var activeModel: AppModel?
     var body: some View {
         SettingsView().environmentObject(activeModel ?? background)
+            .translucentWindow()
+            .tint(Styling.accent)
             .focusedSceneValue(\.searchModel, activeModel ?? background)
             .onAppear { activeModel = delegate.model ?? background }
     }

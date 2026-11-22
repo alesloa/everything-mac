@@ -70,6 +70,7 @@ struct DuplicateFinderView: View {
                 if model.running { Button("Cancel Check") { model.cancel() } }
                 else {
                     Button(scope == .comparison ? "Compare" : "Find Duplicates", action: run)
+                        .glassAction(prominent: true)
                         .keyboardShortcut(.defaultAction).disabled(!canRun)
                 }
             }

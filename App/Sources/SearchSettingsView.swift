@@ -44,6 +44,7 @@ struct SearchSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .padding(20)
     }
 

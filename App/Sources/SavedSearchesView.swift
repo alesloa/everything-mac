@@ -24,6 +24,7 @@ private struct SavedSearchLibraryView: View {
             HStack {
                 TextField("Find saved searches", text: $search)
                 Button("Save current search") { editing = SavedSearch(name: "", state: model.workspaceSnapshot) }
+                    .glassAction(prominent: true)
             }
             List(selection: $selection) {
                 ForEach(searches) { saved in
@@ -96,7 +97,8 @@ private struct SavedSearchEditor: View {
                         if library.storageError == nil { dismiss() }
                         else { error = library.storageError }
                     } catch { self.error = error.localizedDescription }
-                }.keyboardShortcut(.defaultAction).disabled(saved.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }.glassAction(prominent: true)
+                    .keyboardShortcut(.defaultAction).disabled(saved.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     || saved.state.effectiveFilters.validationError != nil)
             }
         }.padding(20).frame(width: 640, height: 660)

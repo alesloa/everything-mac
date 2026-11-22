@@ -42,7 +42,7 @@ struct FolderSearchScopeBar: View {
                 .accessibilityLabel(excluded ? "Remove folder exclusion" : "Remove included folder")
         }
         .font(.caption).padding(.horizontal, 7).padding(.vertical, 4)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+        .background(.quaternary, in: Capsule())
         .help(path.path)
     }
 

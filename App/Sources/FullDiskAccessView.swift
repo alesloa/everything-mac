@@ -19,8 +19,10 @@ struct FullDiskAccessView: View {
             .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 12) {
                 Button("Open System Settings") { FullDiskAccess.openSettings() }
+                    .glassAction(prominent: true)
                     .keyboardShortcut(.defaultAction)
                 Button("Continue Without Full Disk Access") { model.continueWithoutFullDiskAccess() }
+                    .glassAction()
             }
             .padding(.top, 4)
             HStack(spacing: 4) {
@@ -30,8 +32,9 @@ struct FullDiskAccessView: View {
             }
             .font(.callout).foregroundStyle(.secondary)
         }
-        .padding(40)
+        .padding(32)
+        .glassSurface(in: RoundedRectangle(cornerRadius: 28))
+        .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.regularMaterial)
     }
 }

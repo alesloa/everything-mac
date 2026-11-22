@@ -23,8 +23,8 @@ struct ContentView: View {
                     Button("Open Settings") { FullDiskAccess.openSettings() }
                 }
                 .padding(8)
-                .background(.yellow.opacity(0.2))
-                Divider()
+                .glassSurface(in: RoundedRectangle(cornerRadius: 12))
+                .padding(.top, 8)
             }
             SearchField(text: $model.query, focused: $searchFocused, onChange: { model.queryChanged() }, model: model)
             WorkspaceTabBar()
@@ -33,7 +33,6 @@ struct ContentView: View {
                 Text(error).foregroundStyle(.red).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
-            Divider()
             SearchResultsArea(model: model)
             if model.selectionLoading {
                 // Source: the running task resolves the complete selected row ranges.
@@ -50,13 +49,14 @@ struct ContentView: View {
                     Button("Cancel") { ResultActions.state.cancel() }
                 }.padding(8)
             }
-            Divider()
             StatusBar(total: model.total, scanning: model.scanning,
                       shares: model.shares, matches: model.totalMatches, ordering: model.resultOrdering,
                       selected: model.selectionCount)
+                .padding(.top, 8)
         }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(.regularMaterial)
         .onAppear { searchFocused = true }
         .onChange(of: model.focusSearchSignal) { searchFocused = true }
         .onChange(of: model.actionRecords) { model.updateQuickLookSelection() }
@@ -67,7 +67,14 @@ struct ContentView: View {
 
     @ViewBuilder private func featurePanel(_ panel: AppFeaturePanel) -> some View {
         VStack(spacing: 0) {
-            HStack { Spacer(); Button("Close") { model.activePanel = nil }.keyboardShortcut(.cancelAction) }.padding(10)
+            HStack {
+                Spacer()
+                Button("Close") { model.activePanel = nil }
+                    .glassAction()
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
             switch panel {
             case .advancedSearch:
                 AdvancedSearchView(initialQuery: advancedInitialQuery,

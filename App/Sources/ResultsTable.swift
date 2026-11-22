@@ -74,6 +74,11 @@ struct ResultsTable: NSViewRepresentable {
 
         let scroll = NSScrollView()
         scroll.documentView = table
+        if #available(macOS 26.0, *) {
+            scroll.drawsBackground = false
+            table.backgroundColor = .clear
+            table.usesAlternatingRowBackgroundColors = false
+        }
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         context.coordinator.table = table

@@ -11,7 +11,7 @@ struct FolderSidebarToggle: NSViewRepresentable {
     func makeNSView(context: Context) -> NSButton {
         let button = NSButton()
         button.setButtonType(.pushOnPushOff)
-        button.bezelStyle = .texturedRounded
+        button.isBordered = false
         button.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: nil)
         button.imagePosition = .imageOnly
         button.identifier = NSUserInterfaceItemIdentifier("folder-sidebar-toggle")
@@ -24,7 +24,7 @@ struct FolderSidebarToggle: NSViewRepresentable {
     func updateNSView(_ button: NSButton, context: Context) {
         context.coordinator.model = model
         button.state = model.folderSidebarVisible ? .on : .off
-        button.contentTintColor = model.folderSidebarVisible ? .controlAccentColor : .secondaryLabelColor
+        button.contentTintColor = model.folderSidebarVisible ? NSColor(Styling.accent) : .labelColor
         button.setAccessibilityLabel(model.folderSidebarVisible ? "Collapse folder sidebar" : "Expand folder sidebar")
         button.toolTip = model.folderSidebarVisible ? "Collapse folders" : "Expand folders"
     }

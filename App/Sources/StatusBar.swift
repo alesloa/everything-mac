@@ -37,6 +37,7 @@ struct StatusBar: View {
             }
         }
         .font(.system(size: 11)).foregroundStyle(.secondary)
-        .padding(.horizontal, 10).padding(.vertical, 4)
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .glassSurface(in: Capsule())
     }
 }

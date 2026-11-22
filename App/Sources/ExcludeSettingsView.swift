@@ -41,6 +41,7 @@ struct ExcludeSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .padding(20)
     }
 }

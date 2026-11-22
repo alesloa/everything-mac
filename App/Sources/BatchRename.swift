@@ -93,9 +93,12 @@ struct BatchRenameRule: Sendable {
                 HStack {
                     Spacer()
                     Button("Cancel") { completion(nil) }.keyboardShortcut(.cancelAction)
-                    Button("Rename") { validate() }.keyboardShortcut(.defaultAction).disabled(validating)
+                    Button("Rename") { validate() }
+                        .glassAction(prominent: true).keyboardShortcut(.defaultAction).disabled(validating)
                 }
-            }.padding(20)
+            }
+            .padding(20)
+            .tint(Styling.accent)
         }
 
         private var previewNames: [String] {

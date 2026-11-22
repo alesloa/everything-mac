@@ -21,6 +21,7 @@ struct SearchResultsArea: View {
             if model.folderSidebarVisible {
                 FolderSidebarView(snapshot: folders.snapshot, selectedScope: model.folderSearchScope,
                                   onSelect: { model.setFolderSearchScope($0) }, treeState: treeState)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
             }
             VStack(spacing: 0) {
                 if let scope = model.folderSearchScope {
@@ -49,9 +50,12 @@ struct SearchResultsArea: View {
                         onRowSelection: model.selectRows, onRowAction: model.performRows)
                 }
             }.frame(minWidth: 250, maxHeight: .infinity)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                .clipShape(RoundedRectangle(cornerRadius: 14))
             if model.previewVisible {
                 PreviewPane(records: model.actionRecords, allowsNetwork: model.previewAllowsNetwork)
                     .frame(minWidth: 220, idealWidth: 320, maxHeight: .infinity, alignment: .topLeading)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
